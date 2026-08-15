@@ -268,6 +268,58 @@ class CliTests(unittest.TestCase):
         self.assertIn("completed", listed.stdout)
         self.assertIn(sys.executable, listed.stdout)
 
+    def test_declared_artifacts_are_inspectable_after_independent_invocation(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            (root / "config.json").write_text('{"scale": 2}\n', encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "BOURNE_DB": str(database),
+                    "PYTHONPATH": str(project_root / "src"),
+                }
+            )
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "bourneprov",
+                    "run",
+                    "--input",
+                    "config.json",
+                    "--output",
+                    "result.csv",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('result.csv').write_text('value\\n2\\n')",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            shown = subprocess.run(
+                [sys.executable, "-m", "bourneprov", "show", "@1"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("Inputs:", shown.stdout)
+        self.assertIn("config.json", shown.stdout)
+        self.assertIn("Outputs:", shown.stdout)
+        self.assertIn("result.csv", shown.stdout)
+        self.assertIn("SHA-256:", shown.stdout)
+        self.assertIn("Resolved executable:", shown.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

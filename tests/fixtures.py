@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from bourneprov.models import Experiment, GitProvenance, SystemProvenance
+from bourneprov.models import ExecutionContext, Experiment, GitProvenance, SystemProvenance
 
 
 def system_provenance() -> SystemProvenance:
@@ -38,5 +38,10 @@ def experiment(**changes: object) -> Experiment:
             dirty=False,
         ),
         system=system_provenance(),
+        execution_context=ExecutionContext(
+            requested_executable="solver",
+            resolved_executable="/usr/bin/solver",
+            recorder_executable="/usr/bin/bourne-runtime",
+        ),
     )
     return replace(base, **changes)

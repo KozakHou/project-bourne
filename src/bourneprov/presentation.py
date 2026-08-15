@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import shlex
-from typing import Any
+from typing import Any, Sequence
 
-from .models import Experiment
+from .models import Artifact, Experiment
+from .tracing import ArtifactTrace
 
 DEFAULT_ID_PREFIX_LENGTH = 10
 
@@ -59,9 +60,39 @@ def _display(value: object) -> str:
     return str(value)
 
 
-def format_show(experiment: Experiment) -> str:
+def _artifact_state(artifact: Artifact) -> str:
+    if not artifact.exists:
+        return "missing"
+    if artifact.capture_error:
+        return "present (capture incomplete)"
+    return "present"
+
+
+def _artifact_lines(artifact: Artifact, indent: str = "  ") -> list[str]:
+    size = "unavailable" if artifact.size_bytes is None else f"{artifact.size_bytes} bytes"
+    lines = [
+        f"{indent}{artifact.original_path}",
+        f"{indent}  Record: {artifact.id}",
+        f"{indent}  Resolved path: {artifact.resolved_path}",
+        f"{indent}  State: {_artifact_state(artifact)}",
+        f"{indent}  SHA-256: {_display(artifact.sha256)}",
+        f"{indent}  Size: {size}",
+        f"{indent}  Modified (UTC): {_display(artifact.modified_at)}",
+        f"{indent}  Captured (UTC): {artifact.captured_at}",
+    ]
+    if artifact.capture_error:
+        lines.append(f"{indent}  Capture note: {artifact.capture_error}")
+    return lines
+
+
+def format_show(
+    experiment: Experiment,
+    artifacts: Sequence[Artifact] = (),
+    parent: Experiment | None = None,
+) -> str:
     git = experiment.git
     system = experiment.system
+    context = experiment.execution_context
     lines = [
         f"Experiment: {experiment.id}",
         f"Status: {experiment.status}",
@@ -105,6 +136,49 @@ def format_show(experiment: Experiment) -> str:
             f"  GPU collection note: {_display(system.gpu_error)}",
             f"  System collection note: {_display(system.collector_error)}",
             "",
+            "Execution context:",
+            f"  Requested executable: {_display(context.requested_executable)}",
+            f"  Resolved executable: {_display(context.resolved_executable)}",
+            f"  Bourne recorder executable: {_display(context.recorder_executable)}",
+            f"  Container marker observed: {_display(context.containerized)}",
+            "  Safe environment hints:",
+        ]
+    )
+    if context.environment_hints:
+        for name, value in sorted(context.environment_hints.items()):
+            lines.append(f"    {name}: {value}")
+    else:
+        lines.append("    unavailable")
+
+    inputs = [artifact for artifact in artifacts if artifact.role == "input"]
+    outputs = [artifact for artifact in artifacts if artifact.role == "output"]
+    lines.extend(["", "Inputs:"])
+    if inputs:
+        for artifact in inputs:
+            lines.extend(_artifact_lines(artifact))
+    else:
+        lines.append("  None declared.")
+    lines.extend(["", "Outputs:"])
+    if outputs:
+        for artifact in outputs:
+            lines.extend(_artifact_lines(artifact))
+    else:
+        lines.append("  None declared.")
+    lines.extend(["", "Lineage:"])
+    if parent is None:
+        lines.append("  No parent experiment.")
+    else:
+        lines.extend(
+            [
+                "  Derived from:",
+                f"    Experiment: {parent.id}",
+                f"    Command: {format_command(parent)}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
             "Stdout:",
             experiment.stdout.rstrip("\n") or "  <empty>",
             "",
@@ -112,6 +186,49 @@ def format_show(experiment: Experiment) -> str:
             experiment.stderr.rstrip("\n") or "  <empty>",
         ]
     )
+    return "\n".join(lines)
+
+
+def format_trace(trace: ArtifactTrace) -> str:
+    artifact = trace.artifact
+    producer = trace.producer
+    context = producer.execution_context
+    git = producer.git
+    size = "unavailable" if artifact.size_bytes is None else f"{artifact.size_bytes} bytes"
+    lines = [
+        f"Artifact: {artifact.original_path}",
+        f"Artifact record: {artifact.id}",
+        f"Resolved path: {artifact.resolved_path}",
+        f"State: {_artifact_state(artifact)}",
+        f"SHA-256: {_display(artifact.sha256)}",
+        f"Size: {size}",
+        "",
+        "Producing experiment:" if artifact.exists else "Declaring experiment:",
+        f"  Experiment: {producer.id}",
+        f"  Status: {producer.status}",
+        f"  Command: {format_command(producer)}",
+        f"  Working directory: {producer.working_directory}",
+        f"  Requested executable: {_display(context.requested_executable)}",
+        f"  Resolved executable: {_display(context.resolved_executable)}",
+        f"  Git commit: {_display(git.commit_sha)}",
+        f"  Git branch: {_display(git.branch)}",
+        f"  Git dirty: {_display(git.dirty)}",
+        f"  Host: {producer.system.hostname}",
+        f"  Environment hints: {_display(context.environment_hints or None)}",
+        "",
+        "Inputs:",
+    ]
+    if trace.inputs:
+        for item in trace.inputs:
+            lines.extend(_artifact_lines(item))
+    else:
+        lines.append("  None declared.")
+    association = "produced artifact" if artifact.exists else "declared missing output"
+    lines.extend(["", "Ancestry:", f"  {producer.id} ({association})"])
+    for parent in trace.ancestry:
+        lines.append(f"  <- {parent.id} (derived_from; {format_command(parent)})")
+    if not trace.ancestry:
+        lines.append("  No parent experiment.")
     return "\n".join(lines)
 
 
