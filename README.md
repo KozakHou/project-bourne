@@ -9,7 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-Install the current public release:
+This repository documents Project Bourne v0.2.0. Install the latest published
+release from PyPI; during release preparation, the published package can
+briefly lag the repository:
 
 ~~~bash
 python -m pip install bourneprov
@@ -33,7 +35,7 @@ the experiment record.
 
 ## Artifacts and lineage
 
-The v0.2 development branch adds explicit input/output fingerprints, a minimal
+Project Bourne v0.2 adds explicit input/output fingerprints, a minimal
 derived_from relationship, safe execution-context observations, and artifact
 tracing. Run the deterministic example from an isolated directory:
 
@@ -171,8 +173,8 @@ database.
 
 ## Development
 
-This branch uses the internal version 0.2.0.dev0 for review builds. It is not a
-PyPI release. The runtime has zero third-party dependencies.
+The repository package version is 0.2.0. PyPI publication is a separate release
+step. The runtime has zero third-party dependencies.
 
 Run the source-tree tests with:
 
