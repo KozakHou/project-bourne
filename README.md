@@ -9,12 +9,24 @@ the exact argument vector, process output, timing, exit status, Git state, and
 the system that ran them. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
+Project Bourne v0.1.1 is distributed through GitHub Releases and is not yet
+published on PyPI. Download `bourneprov-0.1.1-py3-none-any.whl` from the
+[v0.1.1 release](https://github.com/KozakHou/project-bourne/releases/tag/v0.1.1),
+then install that downloaded file:
+
 ```bash
-pip install bourneprov
+python -m pip install ./bourneprov-0.1.1-py3-none-any.whl
 
 bourne run python examples/demo.py
 bourne list
 bourne show @1
+```
+
+The source distribution, `bourneprov-0.1.1.tar.gz`, is provided on the same
+release for users who prefer to build locally:
+
+```bash
+python -m pip install ./bourneprov-0.1.1.tar.gz
 ```
 
 Run any executable, then compare the two most recent experiments without
