@@ -4,82 +4,107 @@
 
 > **Universal experiment provenance and reproducibility for science and engineering.**
 
-Project Bourne records how scientific and engineering commands were executed:
-the exact argument vector, process output, timing, exit status, Git state, and
-the system that ran them. It is local-first, framework-agnostic, and requires no
+Project Bourne records how arbitrary scientific and engineering commands were
+executed, which files were explicitly used and produced, and how one experiment
+derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-After the v0.1.1 release workflow succeeds, install Project Bourne from PyPI:
+This repository documents Project Bourne v0.2.0. Install the latest published
+release from PyPI; during release preparation, the published package can
+briefly lag the repository:
 
-```bash
+~~~bash
 python -m pip install bourneprov
 
 bourne run python examples/demo.py
 bourne list
 bourne show @1
-```
+~~~
 
-The same verified wheel and source distribution are attached to the
-[v0.1.1 GitHub release](https://github.com/KozakHou/project-bourne/releases/tag/v0.1.1).
-To install a downloaded release asset instead:
+Bourne wraps any executable, not only Python:
 
-```bash
-python -m pip install ./bourneprov-0.1.1-py3-none-any.whl
-python -m pip install ./bourneprov-0.1.1.tar.gz
-```
-
-Run any executable, then compare the two most recent experiments without
-copying their IDs:
-
-```bash
+~~~bash
 bourne run bash -c "echo hello"
-bourne compare @2 @1
-```
-
-The program inside an experiment does not need to be Python. The same wrapper
-works for commands such as:
-
-```bash
 bourne run ./solver case.yaml
 bourne run julia simulation.jl
 bourne run mpirun -np 64 ./solver
-```
+~~~
 
-Program stdout and stderr remain visible while the command runs and are also
-preserved in the experiment record.
+Program stdout and stderr remain visible during execution and are preserved in
+the experiment record.
+
+## Artifacts and lineage
+
+Project Bourne v0.2 adds explicit input/output fingerprints, a minimal
+derived_from relationship, safe execution-context observations, and artifact
+tracing. Run the deterministic example from an isolated directory:
+
+~~~bash
+cp -R examples/provenance /tmp/bourne-provenance-demo
+cd /tmp/bourne-provenance-demo
+export BOURNE_DB="$PWD/bourne.sqlite3"
+
+bourne run \
+  --input config_A.json \
+  --output result_A.csv \
+  -- python demo_simulation.py config_A.json result_A.csv
+
+bourne run \
+  --derived-from @1 \
+  --input config_B.json \
+  --input result_A.csv \
+  --output result_B.csv \
+  -- python demo_simulation.py config_B.json result_B.csv
+
+bourne show @2
+bourne show @1
+bourne trace result_B.csv
+~~~
+
+Inputs are fingerprinted before execution. Outputs are fingerprinted afterward,
+including expected outputs that are missing after a failed or interrupted run.
+SHA-256 reads are streamed in chunks; Bourne does not copy or upload declared
+files.
+
+A path is not artifact identity. Each capture has a stable ULID, while SHA-256
+distinguishes content versions. When a historical path could identify several
+versions and the current file content cannot disambiguate them, bourne trace
+lists candidates and refuses to guess.
+
+See [Artifacts, lineage, and execution context](https://github.com/KozakHou/project-bourne/blob/main/docs/ARTIFACTS_AND_LINEAGE.md)
+for exact capture, trace, migration, and security semantics.
 
 ## Human-friendly experiment references
 
-Every experiment keeps its canonical 26-character ULID in storage. CLI commands
-that accept an experiment also understand convenience references:
+Canonical experiment identities remain 26-character ULIDs. Commands that
+accept an experiment also understand:
 
-```text
-01M02GDJEW...   unique ULID prefix
+~~~text
+01M02GDJEW...   case-insensitive unique ULID prefix
 latest          most recent experiment
 @1              most recent experiment
 @2              second-most-recent experiment
 @3              third-most-recent experiment
-```
+~~~
 
 For example:
 
-```bash
+~~~bash
 bourne show latest
 bourne show 01M02GDJEW
 bourne compare @2 @1
-```
+bourne run --derived-from @1 -- ./solver case_B.yaml
+~~~
 
-Bourne never guesses when a prefix is ambiguous; it lists the matching
-canonical IDs and asks for a longer prefix. `bourne list` displays a concise
-10-character prefix by default. Use `bourne list --full-id` when canonical IDs
-are needed.
+Bourne never guesses when a prefix is ambiguous. bourne list displays a
+10-character prefix by default; bourne list --full-id displays canonical IDs.
 
 ## Shell completion
 
-Completion candidates include canonical experiment IDs, `latest`, and recent
-`@N` references. Activate completion for the current shell session with:
+Completion candidates include canonical experiment IDs, latest, and recent @N
+references. Activate completion for the current shell session with:
 
-```bash
+~~~bash
 # Bash
 source <(bourne completion bash)
 
@@ -88,68 +113,77 @@ source <(bourne completion zsh)
 
 # Fish
 bourne completion fish | source
-```
+~~~
 
-Add the appropriate command to your shell startup file to enable it
-permanently. Completion for `bourne show` and `bourne compare` queries the
-currently configured database, including an exported `BOURNE_DB`.
+Completion for bourne show and bourne compare queries the currently configured
+database, including BOURNE_DB.
 
-## What v0.1.1 records
+## What Bourne records
 
-Each experiment has a public, time-sortable ULID and records:
+Every experiment records:
 
-- execution status (`completed`, `failed`, or `interrupted`), command and
-  arguments, working directory, UTC timestamps, duration, and exit code;
-- captured stdout and stderr;
+- execution status (completed, failed, or interrupted), exact argument vector,
+  working directory, UTC timestamps, duration, and exit code;
+- live and captured stdout/stderr;
 - Git repository root, commit, branch, and dirty state when available;
-- operating system, version, architecture, hostname, CPU, and optional NVIDIA
-  GPU, active driver, and driver-supported CUDA metadata.
+- operating system, architecture, hostname, CPU, and optional NVIDIA runtime
+  metadata;
+- requested and resolved executable paths plus strictly allow-listed
+  virtualenv/Conda context hints;
+- explicitly declared input/output artifact versions and immediate lineage.
 
-Collectors degrade gracefully. A missing Git repository, `nvidia-smi`, NVIDIA
-GPU, or CUDA installation does not stop the experiment.
+Collectors degrade gracefully. Missing Git, NVIDIA tooling, GPUs, environment
+hints, or executable resolution does not stop the workload. Arbitrary
+environment variables are not persisted, so credentials and tokens are not
+captured by default.
 
-Failed and interrupted commands are recorded before `bourne` returns their
-process semantics:
+Failed and interrupted commands are saved before bourne returns their process
+semantics:
 
-```bash
-bourne run python -c "raise RuntimeError('boom')"
-bourne list
-```
+~~~bash
+bourne run --output expected.csv -- python -c "raise RuntimeError('boom')"
+bourne show @1
+~~~
 
-On POSIX systems, Bourne runs an experiment in its own process group so Ctrl+C
-normally terminates its descendants without targeting unrelated processes.
+On POSIX systems, Bourne uses a dedicated process group so Ctrl+C normally
+terminates descendants without targeting unrelated processes.
 
-Process execution success is not a claim of scientific correctness. Scientific
-verification is deliberately separate and is not implemented in v0.1.1.
+Execution success is not scientific verification. Verification is deliberately
+separate and is not implemented in v0.2.
 
-## Local storage
+## Local storage and migration
 
-Bourne stores records in a local SQLite database. The default path is:
+The default SQLite path is:
 
-```text
+~~~text
 ~/.local/share/bourne/experiments.sqlite3
-```
+~~~
 
-Set `BOURNE_DB` to use a different database, which is useful for isolated
-projects and tests:
+Use a project-specific database with:
 
-```bash
-BOURNE_DB=/path/to/experiments.sqlite3 bourne list
-```
+~~~bash
+export BOURNE_DB=/path/to/experiments.sqlite3
+~~~
 
-On Windows, the default uses `%LOCALAPPDATA%\Bourne\experiments.sqlite3` when
-`LOCALAPPDATA` is set. If `XDG_DATA_HOME` is set, Bourne respects it on other
-platforms.
+Opening a v0.1.1 database performs a transactional schema 1 to schema 2
+migration. Existing completed, failed, and interrupted experiments remain
+readable and naturally have no artifact or lineage relationships. Unknown or
+newer schema versions fail explicitly; Bourne never resets an existing
+database.
 
 ## Development
 
-The v0.1.1 runtime uses only the Python standard library. Run the tests with:
+The repository package version is 0.2.0. PyPI publication is a separate release
+step. The runtime has zero third-party dependencies.
 
-```bash
-python -W error::ResourceWarning -m unittest discover -s tests -v
-```
+Run the source-tree tests with:
 
-The first release intentionally does not include artifact tracking, lineage,
-scientific verification, remote execution, schedulers, cloud services,
-dashboards, or autonomous agents. See `docs/VISION.md` for the longer-term
+~~~bash
+PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
+~~~
+
+stdout and stderr are still accumulated in memory before final persistence.
+Disk-spooled logs, automatic artifact discovery, artifact archival, environment
+resolution, schedulers, remote execution, profiling, scientific verification,
+MCP, and agents remain future work. See docs/VISION.md for the longer-term
 direction.

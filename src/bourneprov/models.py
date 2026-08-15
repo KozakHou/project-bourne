@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+ArtifactExistenceState = Literal["present", "missing", "unknown"]
+ArtifactCaptureStatus = Literal["complete", "unreadable", "unsupported", "changed"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,49 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True)
+class ExecutionContext:
+    """Small, safe observations about where a workload was launched."""
+
+    requested_executable: str
+    resolved_executable: str | None = None
+    recorder_executable: str | None = None
+    environment_hints: dict[str, str] = field(default_factory=dict)
+    containerized: bool | None = None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ExecutionContext":
+        return cls(**value)
+
+
+@dataclass(frozen=True)
+class Artifact:
+    """One captured filesystem artifact version associated with an experiment."""
+
+    id: str
+    experiment_id: str
+    role: str
+    original_path: str
+    resolved_path: str
+    existence_state: ArtifactExistenceState
+    capture_status: ArtifactCaptureStatus
+    sha256: str | None
+    size_bytes: int | None
+    modified_at: str | None
+    captured_at: str
+    capture_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ExperimentLineage:
+    """A directed semantic relationship between two experiments."""
+
+    child_experiment_id: str
+    parent_experiment_id: str
+    relationship: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class Experiment:
     id: str
     status: str
@@ -66,7 +112,8 @@ class Experiment:
     stderr: str
     git: GitProvenance
     system: SystemProvenance
-    schema_version: int = 1
+    execution_context: ExecutionContext
+    schema_version: int = 2
 
     @property
     def argv(self) -> list[str]:

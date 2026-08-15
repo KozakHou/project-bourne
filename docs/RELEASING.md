@@ -30,7 +30,7 @@ settings on PyPI.
 
 1. Update and validate the version in `pyproject.toml`.
 2. Ensure the full GitHub Actions CI matrix passes on `main`.
-3. Draft a GitHub Release whose tag is exactly `v<version>`, such as `v0.1.1`,
+3. Draft a GitHub Release whose tag is exactly `v<version>`, such as `v0.2.0`,
    targeting the intended commit on `main`.
 4. Publish the GitHub Release.
 5. Approve the `pypi` environment deployment if environment protection requires
@@ -40,7 +40,7 @@ settings on PyPI.
 7. Verify installation in a fresh environment:
 
    ```bash
-   python -m pip install bourneprov==0.1.1
+   python -m pip install bourneprov==0.2.0
    bourne --version
    ```
 

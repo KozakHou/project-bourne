@@ -19,6 +19,7 @@ class CompletionTests(unittest.TestCase):
         script = completion_script("bash")
         self.assertIn("complete -F _bourne_completion bourne", script)
         self.assertIn('bourne completion --candidates "$current"', script)
+        self.assertIn("trace", script)
 
     def test_completion_cli_prints_generated_script(self) -> None:
         output = io.StringIO()
@@ -32,11 +33,13 @@ class CompletionTests(unittest.TestCase):
         script = completion_script("zsh")
         self.assertIn("#compdef bourne", script)
         self.assertIn("compdef _bourne bourne", script)
+        self.assertIn("trace", script)
 
     def test_fish_completion_generation(self) -> None:
         script = completion_script("fish")
         self.assertIn("complete -c bourne", script)
         self.assertIn("__bourne_experiment_references", script)
+        self.assertIn("trace", script)
 
     def test_candidates_include_ids_and_relative_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
