@@ -61,10 +61,16 @@ def _display(value: object) -> str:
 
 
 def _artifact_state(artifact: Artifact) -> str:
-    if not artifact.exists:
+    if artifact.existence_state == "missing":
         return "missing"
-    if artifact.capture_error:
-        return "present (capture incomplete)"
+    if artifact.existence_state == "unknown":
+        return "unreadable (existence unknown)"
+    if artifact.capture_status == "unsupported":
+        return "unsupported (present)"
+    if artifact.capture_status == "unreadable":
+        return "unreadable (present)"
+    if artifact.capture_status == "changed":
+        return "changed during capture (present)"
     return "present"
 
 
@@ -75,6 +81,8 @@ def _artifact_lines(artifact: Artifact, indent: str = "  ") -> list[str]:
         f"{indent}  Record: {artifact.id}",
         f"{indent}  Resolved path: {artifact.resolved_path}",
         f"{indent}  State: {_artifact_state(artifact)}",
+        f"{indent}  Existence: {artifact.existence_state}",
+        f"{indent}  Capture status: {artifact.capture_status}",
         f"{indent}  SHA-256: {_display(artifact.sha256)}",
         f"{indent}  Size: {size}",
         f"{indent}  Modified (UTC): {_display(artifact.modified_at)}",
@@ -195,15 +203,29 @@ def format_trace(trace: ArtifactTrace) -> str:
     context = producer.execution_context
     git = producer.git
     size = "unavailable" if artifact.size_bytes is None else f"{artifact.size_bytes} bytes"
+    if artifact.existence_state == "present" and artifact.capture_status == "complete":
+        experiment_heading = "Producing experiment:"
+        association = "produced artifact"
+    elif artifact.existence_state == "missing":
+        experiment_heading = "Declaring experiment:"
+        association = "declared missing output"
+    elif artifact.existence_state == "unknown":
+        experiment_heading = "Declaring experiment:"
+        association = "declared output; existence unknown"
+    else:
+        experiment_heading = "Associated experiment:"
+        association = f"observed output; capture {artifact.capture_status}"
     lines = [
         f"Artifact: {artifact.original_path}",
         f"Artifact record: {artifact.id}",
         f"Resolved path: {artifact.resolved_path}",
         f"State: {_artifact_state(artifact)}",
+        f"Existence: {artifact.existence_state}",
+        f"Capture status: {artifact.capture_status}",
         f"SHA-256: {_display(artifact.sha256)}",
         f"Size: {size}",
         "",
-        "Producing experiment:" if artifact.exists else "Declaring experiment:",
+        experiment_heading,
         f"  Experiment: {producer.id}",
         f"  Status: {producer.status}",
         f"  Command: {format_command(producer)}",
@@ -223,7 +245,6 @@ def format_trace(trace: ArtifactTrace) -> str:
             lines.extend(_artifact_lines(item))
     else:
         lines.append("  None declared.")
-    association = "produced artifact" if artifact.exists else "declared missing output"
     lines.extend(["", "Ancestry:", f"  {producer.id} ({association})"])
     for parent in trace.ancestry:
         lines.append(f"  <- {parent.id} (derived_from; {format_command(parent)})")

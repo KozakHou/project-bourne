@@ -56,12 +56,33 @@ _MIGRATION_1_TO_2 = (
         role TEXT NOT NULL CHECK (length(role) > 0),
         original_path TEXT NOT NULL,
         resolved_path TEXT NOT NULL,
-        exists_state INTEGER NOT NULL CHECK (exists_state IN (0, 1)),
+        existence_state TEXT NOT NULL
+            CHECK (existence_state IN ('present', 'missing', 'unknown')),
+        capture_status TEXT NOT NULL
+            CHECK (capture_status IN ('complete', 'unreadable', 'unsupported', 'changed')),
         sha256 TEXT,
         size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
         modified_at TEXT,
         captured_at TEXT NOT NULL,
-        capture_error TEXT
+        capture_error TEXT,
+        CHECK (
+            (existence_state = 'present'
+                AND capture_status IN ('complete', 'unreadable', 'unsupported', 'changed'))
+            OR (existence_state = 'missing' AND capture_status = 'complete')
+            OR (existence_state = 'unknown' AND capture_status = 'unreadable')
+        ),
+        CHECK (
+            (existence_state = 'present' AND capture_status = 'complete'
+                AND sha256 IS NOT NULL)
+            OR ((existence_state <> 'present' OR capture_status <> 'complete')
+                AND sha256 IS NULL)
+        ),
+        CHECK (
+            (existence_state = 'present' AND size_bytes IS NOT NULL
+                AND modified_at IS NOT NULL)
+            OR (existence_state IN ('missing', 'unknown') AND size_bytes IS NULL
+                AND modified_at IS NULL)
+        )
     ) WITHOUT ROWID
     """,
     """
@@ -212,9 +233,9 @@ class ExperimentStore:
                 """
                 INSERT INTO artifacts (
                     id, experiment_id, role, original_path, resolved_path,
-                    exists_state, sha256, size_bytes, modified_at, captured_at,
-                    capture_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    existence_state, capture_status, sha256, size_bytes,
+                    modified_at, captured_at, capture_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -223,7 +244,8 @@ class ExperimentStore:
                         item.role,
                         item.original_path,
                         item.resolved_path,
-                        int(item.exists),
+                        item.existence_state,
+                        item.capture_status,
                         item.sha256,
                         item.size_bytes,
                         item.modified_at,
@@ -355,6 +377,9 @@ class ExperimentStore:
         if sha256 is not None:
             clauses.append("sha256 = ?")
             parameters.append(sha256)
+            clauses.extend(
+                ["existence_state = 'present'", "capture_status = 'complete'"]
+            )
         self.initialize()
         with self._connection() as connection:
             rows = connection.execute(
@@ -418,7 +443,8 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         role=row["role"],
         original_path=row["original_path"],
         resolved_path=row["resolved_path"],
-        exists=bool(row["exists_state"]),
+        existence_state=row["existence_state"],
+        capture_status=row["capture_status"],
         sha256=row["sha256"],
         size_bytes=row["size_bytes"],
         modified_at=row["modified_at"],

@@ -10,11 +10,41 @@ from unittest.mock import patch
 
 from bourneprov.artifacts import HASH_CHUNK_SIZE, capture_artifact, sha256_file
 from bourneprov.lifecycle import run_and_record
+from bourneprov.models import Artifact, ArtifactCaptureStatus, ArtifactExistenceState
+from bourneprov.presentation import format_show
 from bourneprov.storage import ExperimentStore
-from tests.fixtures import system_provenance
+from tests.fixtures import experiment, system_provenance
 
 
 class ArtifactCaptureTests(unittest.TestCase):
+    @staticmethod
+    def _artifact(
+        *,
+        suffix: str,
+        existence_state: ArtifactExistenceState,
+        capture_status: ArtifactCaptureStatus,
+    ) -> Artifact:
+        present = existence_state == "present"
+        complete_digest = present and capture_status == "complete"
+        return Artifact(
+            id=f"01HARTIFACT{suffix}".ljust(26, "0"),
+            experiment_id="01H00000000000000000000000",
+            role="output",
+            original_path=f"state-{suffix}.dat",
+            resolved_path=f"/work/state-{suffix}.dat",
+            existence_state=existence_state,
+            capture_status=capture_status,
+            sha256="a" * 64 if complete_digest else None,
+            size_bytes=1 if present else None,
+            modified_at="2026-01-01T00:00:00.000000Z" if present else None,
+            captured_at="2026-01-01T00:00:01.000000Z",
+            capture_error=(
+                None
+                if complete_digest or existence_state == "missing"
+                else f"{capture_status} test state"
+            ),
+        )
+
     def test_sha256_is_correct(self) -> None:
         payload = b"scientific input\x00with bytes\n"
         with tempfile.TemporaryDirectory() as directory:
@@ -46,10 +76,91 @@ class ArtifactCaptureTests(unittest.TestCase):
                 "01H00000000000000000000000", "input", "missing input.dat", root
             )
 
-        self.assertFalse(artifact.exists)
+        self.assertEqual(artifact.existence_state, "missing")
+        self.assertEqual(artifact.capture_status, "complete")
         self.assertIsNone(artifact.sha256)
         self.assertIsNone(artifact.size_bytes)
         self.assertTrue(artifact.resolved_path.endswith("missing input.dat"))
+
+    def test_regular_file_is_present_and_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "readable.dat").write_bytes(b"readable")
+            artifact = capture_artifact(
+                "01H00000000000000000000000", "input", "readable.dat", root
+            )
+
+        self.assertEqual(artifact.existence_state, "present")
+        self.assertEqual(artifact.capture_status, "complete")
+        self.assertEqual(artifact.sha256, hashlib.sha256(b"readable").hexdigest())
+
+    def test_inspection_error_is_unknown_and_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(Path, "stat", side_effect=PermissionError("denied")):
+                artifact = capture_artifact(
+                    "01H00000000000000000000000", "input", "blocked.dat", root
+                )
+
+        self.assertEqual(artifact.existence_state, "unknown")
+        self.assertEqual(artifact.capture_status, "unreadable")
+        self.assertIsNone(artifact.sha256)
+        self.assertIn("could not inspect artifact", artifact.capture_error or "")
+
+    def test_non_regular_object_is_present_and_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "declared-directory").mkdir()
+            artifact = capture_artifact(
+                "01H00000000000000000000000",
+                "output",
+                "declared-directory",
+                root,
+            )
+
+        self.assertEqual(artifact.existence_state, "present")
+        self.assertEqual(artifact.capture_status, "unsupported")
+        self.assertIsNone(artifact.sha256)
+
+    def test_fingerprint_read_error_is_present_and_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "blocked.dat").write_bytes(b"present")
+            with patch(
+                "bourneprov.artifacts.sha256_file",
+                side_effect=PermissionError("denied"),
+            ):
+                artifact = capture_artifact(
+                    "01H00000000000000000000000", "input", "blocked.dat", root
+                )
+
+        self.assertEqual(artifact.existence_state, "present")
+        self.assertEqual(artifact.capture_status, "unreadable")
+        self.assertIsNone(artifact.sha256)
+        self.assertEqual(artifact.size_bytes, len(b"present"))
+
+    def test_change_during_hashing_is_present_and_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "changing.dat"
+            path.write_bytes(b"before")
+
+            def change_while_hashing(captured_path: Path) -> str:
+                digest = hashlib.sha256(captured_path.read_bytes()).hexdigest()
+                captured_path.write_bytes(b"after with a different size")
+                return digest
+
+            with patch(
+                "bourneprov.artifacts.sha256_file", side_effect=change_while_hashing
+            ):
+                artifact = capture_artifact(
+                    "01H00000000000000000000000", "output", "changing.dat", root
+                )
+
+        self.assertEqual(artifact.existence_state, "present")
+        self.assertEqual(artifact.capture_status, "changed")
+        self.assertIsNone(artifact.sha256)
+        self.assertIn("changed while", artifact.capture_error or "")
 
     def test_input_is_captured_before_execution_and_outputs_after(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -83,7 +194,14 @@ class ArtifactCaptureTests(unittest.TestCase):
         self.assertEqual(len(inputs), 2)
         self.assertEqual(len(outputs), 2)
         self.assertEqual(inputs[0].sha256, expected_input_hash)
-        self.assertTrue(all(item.exists and item.sha256 for item in outputs))
+        self.assertTrue(
+            all(
+                item.existence_state == "present"
+                and item.capture_status == "complete"
+                and item.sha256
+                for item in outputs
+            )
+        )
 
     def test_same_path_with_changed_content_creates_distinct_versions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -129,9 +247,76 @@ class ArtifactCaptureTests(unittest.TestCase):
 
         self.assertEqual(experiment.status, "failed")
         self.assertEqual(experiment.exit_code, 7)
-        self.assertTrue(artifacts[0].exists)
-        self.assertFalse(artifacts[1].exists)
+        self.assertEqual(artifacts[0].existence_state, "present")
+        self.assertEqual(artifacts[0].capture_status, "complete")
+        self.assertEqual(artifacts[1].existence_state, "missing")
+        self.assertEqual(artifacts[1].capture_status, "complete")
         self.assertEqual(artifacts[1].role, "output")
+
+    def test_every_artifact_state_persists_and_reloads(self) -> None:
+        states: list[tuple[ArtifactExistenceState, ArtifactCaptureStatus]] = [
+            ("present", "complete"),
+            ("missing", "complete"),
+            ("unknown", "unreadable"),
+            ("present", "unreadable"),
+            ("present", "unsupported"),
+            ("present", "changed"),
+        ]
+        artifacts = [
+            self._artifact(
+                suffix=str(index),
+                existence_state=existence_state,
+                capture_status=capture_status,
+            )
+            for index, (existence_state, capture_status) in enumerate(states)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            store = ExperimentStore(Path(directory) / "bourne.sqlite3")
+            store.save_record(experiment(), artifacts)
+            reloaded = store.list_artifacts("01H00000000000000000000000")
+
+        self.assertEqual(
+            {(item.existence_state, item.capture_status) for item in reloaded},
+            set(states),
+        )
+        self.assertTrue(
+            all(
+                item.sha256 is not None
+                if (item.existence_state, item.capture_status)
+                == ("present", "complete")
+                else item.sha256 is None
+                for item in reloaded
+            )
+        )
+
+    def test_show_distinguishes_every_artifact_state(self) -> None:
+        states: list[tuple[ArtifactExistenceState, ArtifactCaptureStatus]] = [
+            ("present", "complete"),
+            ("missing", "complete"),
+            ("unknown", "unreadable"),
+            ("present", "unreadable"),
+            ("present", "unsupported"),
+            ("present", "changed"),
+        ]
+        artifacts = [
+            self._artifact(
+                suffix=str(index),
+                existence_state=existence_state,
+                capture_status=capture_status,
+            )
+            for index, (existence_state, capture_status) in enumerate(states)
+        ]
+
+        rendered = format_show(experiment(), artifacts)
+
+        self.assertIn("State: present", rendered)
+        self.assertIn("State: missing", rendered)
+        self.assertIn("State: unreadable (existence unknown)", rendered)
+        self.assertIn("State: unreadable (present)", rendered)
+        self.assertIn("State: unsupported (present)", rendered)
+        self.assertIn("State: changed during capture (present)", rendered)
+        self.assertIn("Existence: unknown", rendered)
+        self.assertIn("Capture status: changed", rendered)
 
 
 if __name__ == "__main__":

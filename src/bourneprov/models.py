@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+ArtifactExistenceState = Literal["present", "missing", "unknown"]
+ArtifactCaptureStatus = Literal["complete", "unreadable", "unsupported", "changed"]
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,8 @@ class Artifact:
     role: str
     original_path: str
     resolved_path: str
-    exists: bool
+    existence_state: ArtifactExistenceState
+    capture_status: ArtifactCaptureStatus
     sha256: str | None
     size_bytes: int | None
     modified_at: str | None

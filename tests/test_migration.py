@@ -101,6 +101,9 @@ class MigrationTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )
                 }
+                artifact_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(artifacts)")
+                }
                 foreign_key_errors = connection.execute(
                     "PRAGMA foreign_key_check"
                 ).fetchall()
@@ -117,6 +120,9 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(version, 2)
         self.assertIn("artifacts", tables)
         self.assertIn("experiment_lineage", tables)
+        self.assertIn("existence_state", artifact_columns)
+        self.assertIn("capture_status", artifact_columns)
+        self.assertNotIn("exists_state", artifact_columns)
         self.assertEqual(len(all_records), 4)
         self.assertEqual(reloaded_new, new_record)
         self.assertEqual(foreign_key_errors, [])

@@ -73,7 +73,8 @@ def capture_artifact(
     except FileNotFoundError:
         return Artifact(
             **common,
-            exists=False,
+            existence_state="missing",
+            capture_status="complete",
             sha256=None,
             size_bytes=None,
             modified_at=None,
@@ -82,7 +83,8 @@ def capture_artifact(
     except OSError as exc:
         return Artifact(
             **common,
-            exists=False,
+            existence_state="unknown",
+            capture_status="unreadable",
             sha256=None,
             size_bytes=None,
             modified_at=None,
@@ -92,7 +94,8 @@ def capture_artifact(
     if not stat.S_ISREG(stat_before.st_mode):
         return Artifact(
             **common,
-            exists=True,
+            existence_state="present",
+            capture_status="unsupported",
             sha256=None,
             size_bytes=stat_before.st_size,
             modified_at=_timestamp(stat_before.st_mtime),
@@ -105,7 +108,8 @@ def capture_artifact(
     except OSError as exc:
         return Artifact(
             **common,
-            exists=True,
+            existence_state="present",
+            capture_status="unreadable",
             sha256=None,
             size_bytes=stat_before.st_size,
             modified_at=_timestamp(stat_before.st_mtime),
@@ -118,7 +122,8 @@ def capture_artifact(
     )
     return Artifact(
         **common,
-        exists=True,
+        existence_state="present",
+        capture_status="changed" if changed else "complete",
         sha256=None if changed else digest,
         size_bytes=stat_after.st_size,
         modified_at=_timestamp(stat_after.st_mtime),

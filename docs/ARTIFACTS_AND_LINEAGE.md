@@ -30,7 +30,7 @@ version record containing:
 - its own stable ULID;
 - the original and normalized absolute path;
 - the input or output role;
-- present/missing state;
+- explicit existence (`present`, `missing`, or `unknown`) and capture status;
 - SHA-256 content identity, byte size, and modification time when readable;
 - capture time and any capture error.
 
@@ -39,7 +39,11 @@ not copy them into hidden storage. A path is not identity: repeated writes to
 result.csv create distinct records, and changed content has a different hash.
 
 bourne show EXPERIMENT displays declared inputs, outputs, and immediate
-ancestry. Expected outputs that do not exist are shown as missing.
+ancestry. Expected outputs that definitely do not exist are shown as missing.
+An inspection failure is instead retained as unknown/unreadable. Existing
+non-regular paths, read failures, and files changed during fingerprinting are
+likewise preserved as distinct unsupported, unreadable, and changed states.
+Only a complete digest is used as content identity.
 
 ## Lineage
 

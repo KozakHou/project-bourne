@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from bourneprov.artifacts import capture_artifact
 from bourneprov.cli import main
-from bourneprov.models import ExperimentLineage
+from bourneprov.models import Artifact, ExperimentLineage
+from bourneprov.presentation import format_trace
 from bourneprov.storage import ExperimentStore
 from bourneprov.tracing import (
     AmbiguousArtifactReference,
@@ -226,6 +227,35 @@ class TraceTests(unittest.TestCase):
             store = ExperimentStore(root / "bourne.sqlite3")
             with self.assertRaises(MissingArtifactReference):
                 trace_artifact(store, "unknown-output.dat", cwd=root)
+
+    def test_trace_reports_unknown_existence_without_calling_it_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExperimentStore(root / "bourne.sqlite3")
+            producer = experiment()
+            artifact = Artifact(
+                id="01HUNKNOWN" + "0" * 16,
+                experiment_id=producer.id,
+                role="output",
+                original_path="blocked.dat",
+                resolved_path=str((root / "blocked.dat").resolve()),
+                existence_state="unknown",
+                capture_status="unreadable",
+                sha256=None,
+                size_bytes=None,
+                modified_at=None,
+                captured_at="2026-01-01T00:00:01.000000Z",
+                capture_error="could not inspect artifact: denied",
+            )
+            store.save_record(producer, [artifact])
+
+            rendered = format_trace(trace_artifact(store, "blocked.dat", cwd=root))
+
+        self.assertIn("State: unreadable (existence unknown)", rendered)
+        self.assertIn("Existence: unknown", rendered)
+        self.assertIn("Capture status: unreadable", rendered)
+        self.assertNotIn("State: missing", rendered)
+        self.assertIn("declared output; existence unknown", rendered)
 
     def test_ambiguous_historical_path_does_not_guess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
