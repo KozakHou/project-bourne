@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
+from bourneprov.discovery import discover_site
+from bourneprov.discovery_providers import (
+    CurrentEnvironmentProvider,
+    CurrentTargetProvider,
+    SystemCapabilityProvider,
+)
+from bourneprov.inventory_storage import InventoryStore
 from bourneprov.models import GitProvenance
 from bourneprov.storage import (
     DatabaseMigrationError,
@@ -76,6 +85,68 @@ def create_v1_database(path: Path) -> list[str]:
 
 
 class MigrationTests(unittest.TestCase):
+    def _migrate_released_fixture(self, version: str):
+        fixture = Path(__file__).parent / "released_databases" / f"bourneprov-{version}.db"
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Path(temporary.name) / "bourne.sqlite3"
+        shutil.copy2(fixture, database)
+        experiment_store = ExperimentStore(database)
+        before_ids = [item.id for item in experiment_store.list_recent(limit=100)]
+        with patch(
+            "bourneprov.discovery_providers.collect_system",
+            return_value=system_provenance(),
+        ):
+            snapshot = discover_site(
+                InventoryStore(database), cwd=Path(temporary.name),
+                environment={"PATH": "", "HOME": temporary.name},
+                providers=[
+                    CurrentTargetProvider(), CurrentEnvironmentProvider(),
+                    SystemCapabilityProvider(),
+                ],
+            )
+        reopened = InventoryStore(database).get(snapshot.id)
+        after = ExperimentStore(database).list_recent(limit=100)
+        with closing(sqlite3.connect(database)) as connection:
+            version_after = connection.execute("PRAGMA user_version").fetchone()[0]
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
+        return database, before_ids, after, reopened, version_after, integrity, foreign_keys
+
+    def test_actual_released_v011_database_migrates_to_schema_three(self) -> None:
+        (
+            _database, before_ids, after, snapshot, version, integrity, foreign_keys
+        ) = self._migrate_released_fixture("0.1.1")
+
+        self.assertEqual({item.status for item in after}, {"completed", "failed", "interrupted"})
+        self.assertEqual({item.id for item in after}, set(before_ids))
+        self.assertTrue(all(item.schema_version == 1 for item in after))
+        self.assertEqual(version, 3)
+        self.assertEqual(integrity, "ok")
+        self.assertEqual(foreign_keys, [])
+        self.assertEqual(len(snapshot.targets), 1)
+        self.assertGreaterEqual(len(snapshot.capabilities), 2)
+
+    def test_actual_released_v020_database_migrates_to_schema_three(self) -> None:
+        (
+            database, before_ids, after, snapshot, version, integrity, foreign_keys
+        ) = self._migrate_released_fixture("0.2.0")
+        store = ExperimentStore(database)
+        artifacts = [item for record in after for item in store.list_artifacts(record.id)]
+        lineage = [store.get_lineage(record.id) for record in after]
+
+        self.assertEqual({item.id for item in after}, set(before_ids))
+        self.assertEqual({item.status for item in after}, {"completed", "failed"})
+        self.assertEqual({item.existence_state for item in artifacts}, {"present", "missing"})
+        self.assertEqual({item.capture_status for item in artifacts}, {"complete"})
+        self.assertTrue(any(item is not None for item in lineage))
+        self.assertTrue(all(item.execution_context.requested_executable for item in after))
+        self.assertEqual(version, 3)
+        self.assertEqual(integrity, "ok")
+        self.assertEqual(foreign_keys, [])
+        self.assertEqual(len(snapshot.execution_contexts), 1)
+        self.assertGreaterEqual(len(snapshot.capabilities), 2)
+
     def test_realistic_v1_database_migrates_and_remains_reopenable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "bourne.sqlite3"
@@ -117,9 +188,16 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(
             all(item.execution_context.requested_executable == "solver" for item in old_records)
         )
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
         self.assertIn("artifacts", tables)
         self.assertIn("experiment_lineage", tables)
+        self.assertIn("inventory_snapshots", tables)
+        self.assertIn("discovered_targets", tables)
+        self.assertIn("storage_resources", tables)
+        self.assertIn("scheduler_resources", tables)
+        self.assertIn("discovered_execution_contexts", tables)
+        self.assertIn("capabilities", tables)
+        self.assertIn("provider_results", tables)
         self.assertIn("existence_state", artifact_columns)
         self.assertIn("capture_status", artifact_columns)
         self.assertNotIn("exists_state", artifact_columns)

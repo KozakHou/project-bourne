@@ -8,12 +8,13 @@ import json
 import platform
 import re
 import shutil
-import subprocess
 from pathlib import Path
 
+from ..bounded_subprocess import run_bounded_command
 from ..models import SystemProvenance
 
 _TIMEOUT_SECONDS = 5
+_MAX_OUTPUT_BYTES = 1024 * 1024
 _CUDA_PATTERN = re.compile(r"CUDA Version:\s*([^\s|]+)", re.IGNORECASE)
 
 
@@ -39,13 +40,10 @@ def collect_cpu() -> str | None:
     lscpu = shutil.which("lscpu")
     if lscpu:
         try:
-            completed = subprocess.run(
+            completed = run_bounded_command(
                 [lscpu, "--json"],
-                capture_output=True,
-                text=True,
-                errors="replace",
                 timeout=_TIMEOUT_SECONDS,
-                check=False,
+                max_output_bytes=_MAX_OUTPUT_BYTES,
             )
             if completed.returncode == 0:
                 payload = json.loads(completed.stdout)
@@ -57,25 +55,22 @@ def collect_cpu() -> str | None:
                 unique_models = list(dict.fromkeys(model for model in models if model))
                 if unique_models:
                     return " / ".join(unique_models)
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, AttributeError):
+        except (OSError, json.JSONDecodeError, AttributeError):
             pass
     return architecture or None
 
 
 def _run_nvidia_smi(executable: str, *arguments: str) -> tuple[str | None, str | None]:
     try:
-        completed = subprocess.run(
+        completed = run_bounded_command(
             [executable, *arguments],
-            capture_output=True,
-            text=True,
-            errors="replace",
             timeout=_TIMEOUT_SECONDS,
-            check=False,
+            max_output_bytes=_MAX_OUTPUT_BYTES,
         )
-    except subprocess.TimeoutExpired:
-        return None, "nvidia-smi timed out"
     except OSError as exc:
         return None, f"nvidia-smi failed: {exc}"
+    if completed.timed_out:
+        return None, "nvidia-smi timed out"
     if completed.returncode != 0:
         detail = (
             completed.stderr.strip()

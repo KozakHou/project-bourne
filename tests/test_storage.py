@@ -24,7 +24,7 @@ class StorageTests(unittest.TestCase):
                     "SELECT sql FROM sqlite_master WHERE name = 'experiments'"
                 ).fetchone()[0]
 
-        self.assertEqual(user_version, 2)
+        self.assertEqual(user_version, 3)
         self.assertIn("id TEXT PRIMARY KEY", table_sql)
         self.assertIn("WITHOUT ROWID", table_sql)
 

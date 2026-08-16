@@ -989,23 +989,23 @@ Artifacts + lineage
         │
         ▼
 v0.3
-Native / Rust core exploration
+Compute-site topology + capability discovery
         │
         ▼
 v0.4
-Scientific verification
+Workload discovery + execution-context resolution
         │
         ▼
 v0.5
-Closed-loop execution
+Scientific verification
         │
         ▼
 v0.6
-Graph / multi-agent execution
+Closed-loop execution
         │
         ▼
 v0.7+
-Natural-language scientific agent
+Graph / agent-assisted scientific execution
 ```
 
 This sequence is directional rather than contractual.

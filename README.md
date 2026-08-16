@@ -9,9 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-This repository documents Project Bourne v0.2.0. Install the latest published
-release from PyPI; during release preparation, the published package can
-briefly lag the repository:
+The latest public release is Project Bourne v0.2.0. Install it from PyPI; the
+current repository is developing v0.3.0 and can briefly be ahead of the
+published package:
 
 ~~~bash
 python -m pip install bourneprov
@@ -32,6 +32,33 @@ bourne run mpirun -np 64 ./solver
 
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
+
+## Compute-site discovery (v0.3 development)
+
+Bourne can take an immutable, local snapshot of the execution surface visible
+to your current identity. Install this repository checkout (`python -m pip
+install .`) to try the development command set:
+
+~~~bash
+bourne discover
+bourne inventory
+bourne inventory --find python
+bourne inventory --json
+~~~
+
+Discovery covers the current identity and access target, allow-listed
+user-relevant storage paths, direct execution contexts, generic PATH
+executables, optional Conda/virtualenv/container/module contexts, safe system
+capabilities, Bourne history, and read-only Slurm/PBS target-class summaries
+when available. An unknown executable is recorded generically without being
+run. A laptop without a scheduler is a complete and normal compute site.
+
+Discovery is observational: an executable is not verified workload
+compatibility, a visible scheduler partition is not proof of submission
+authorization, and a storage role hint is not a retention or backup policy.
+Inventories remain local and no provider scans other users, compute nodes, or
+container contents. See [Compute-site discovery](docs/COMPUTE_SITE_DISCOVERY.md)
+for the exact topology, evidence, limits, and security semantics.
 
 ## Artifacts and lineage
 
@@ -148,8 +175,8 @@ bourne show @1
 On POSIX systems, Bourne uses a dedicated process group so Ctrl+C normally
 terminates descendants without targeting unrelated processes.
 
-Execution success is not scientific verification. Verification is deliberately
-separate and is not implemented in v0.2.
+Execution success is not scientific verification. Verification remains a
+separate future capability.
 
 ## Local storage and migration
 
@@ -165,16 +192,17 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1 database performs a transactional schema 1 to schema 2
-migration. Existing completed, failed, and interrupted experiments remain
-readable and naturally have no artifact or lineage relationships. Unknown or
-newer schema versions fail explicitly; Bourne never resets an existing
-database.
+Opening a v0.1.1 or v0.2.0 database performs deterministic transactional
+migrations through schema 3. Existing completed, failed, and interrupted
+experiments, artifacts, lineage, and execution-context observations remain
+readable. Unknown or newer schema versions fail explicitly; Bourne never
+resets an existing database. Each new discovery creates a separate immutable
+snapshot.
 
 ## Development
 
-The repository package version is 0.2.0. PyPI publication is a separate release
-step. The runtime has zero third-party dependencies.
+The repository development version is 0.3.0.dev0. PyPI publication is a
+separate release step. The runtime has zero third-party dependencies.
 
 Run the source-tree tests with:
 
@@ -183,7 +211,7 @@ PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
 ~~~
 
 stdout and stderr are still accumulated in memory before final persistence.
-Disk-spooled logs, automatic artifact discovery, artifact archival, environment
-resolution, schedulers, remote execution, profiling, scientific verification,
-MCP, and agents remain future work. See docs/VISION.md for the longer-term
-direction.
+Disk-spooled experiment logs, automatic artifact discovery, artifact archival,
+workload inference, environment resolution/selection, scheduler submission,
+remote execution, profiling, scientific verification, MCP, and agents remain
+future work. See docs/VISION.md for the longer-term direction.

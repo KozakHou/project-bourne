@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.collectors.git import collect_git
 from bourneprov.collectors.system import collect_cpu, collect_system
 
@@ -80,15 +81,15 @@ class SystemCollectorTests(unittest.TestCase):
         self.assertIn("active driver", provenance.cuda_version_source or "")
 
     def test_failed_nvidia_diagnostic_on_stdout_is_preserved(self) -> None:
-        failed = subprocess.CompletedProcess(
-            ["nvidia-smi"],
+        failed = BoundedCommandResult(
+            ("nvidia-smi",),
             9,
             stdout="NVIDIA-SMI could not communicate with the active driver\n",
             stderr="",
         )
         with (
             patch("bourneprov.collectors.system.shutil.which", return_value="nvidia-smi"),
-            patch("bourneprov.collectors.system.subprocess.run", return_value=failed),
+            patch("bourneprov.collectors.system.run_bounded_command", return_value=failed),
         ):
             provenance = collect_system()
 
@@ -102,15 +103,15 @@ class SystemCollectorTests(unittest.TestCase):
             '{"field": "Model name:", "data": "Cortex-A725"}'
             "]}"
         )
-        completed = subprocess.CompletedProcess(
-            ["lscpu", "--json"], 0, stdout=lscpu_payload, stderr=""
+        completed = BoundedCommandResult(
+            ("lscpu", "--json"), 0, stdout=lscpu_payload, stderr=""
         )
         with (
             patch("bourneprov.collectors.system.platform.processor", return_value="aarch64"),
             patch("bourneprov.collectors.system.platform.machine", return_value="aarch64"),
             patch("bourneprov.collectors.system.Path.read_text", return_value="processor: 0\n"),
             patch("bourneprov.collectors.system.shutil.which", return_value="lscpu"),
-            patch("bourneprov.collectors.system.subprocess.run", return_value=completed),
+            patch("bourneprov.collectors.system.run_bounded_command", return_value=completed),
         ):
             cpu = collect_cpu()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -10,6 +11,10 @@ from typing import Sequence
 from . import __version__
 from .completion import completion_script, experiment_candidates
 from .config import default_database_path
+from .discovery import discover_site, find_capabilities
+from .inventory_presentation import format_capability_matches, format_inventory
+from .inventory_references import InventoryReferenceError, resolve_inventory
+from .inventory_storage import InventoryStore
 from .lifecycle import run_and_record
 from .presentation import format_compare, format_list, format_show, format_trace
 from .references import ExperimentReferenceError, resolve_experiment
@@ -66,6 +71,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     completion_parser.add_argument("shell", nargs="?", choices=("bash", "zsh", "fish"))
     completion_parser.add_argument("--candidates", help=argparse.SUPPRESS)
+
+    discover_parser = subparsers.add_parser(
+        "discover", help="discover and persist the current compute-site surface"
+    )
+    discover_parser.add_argument(
+        "--json", action="store_true", help="write structured JSON"
+    )
+
+    inventory_parser = subparsers.add_parser(
+        "inventory", help="inspect a persisted compute-site inventory"
+    )
+    inventory_parser.add_argument(
+        "reference", nargs="?", default="latest", help="snapshot ID, prefix, latest, or @N"
+    )
+    inventory_parser.add_argument(
+        "--find", metavar="NAME", help="find every exact capability-name match"
+    )
+    inventory_parser.add_argument(
+        "--json", action="store_true", help="write structured JSON"
+    )
     return parser
 
 
@@ -81,6 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
     store = ExperimentStore(default_database_path())
+    inventory_store = InventoryStore(default_database_path())
 
     if arguments.subcommand == "run":
         command = list(arguments.command)
@@ -151,6 +177,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(completion_script(arguments.shell), end="")
         return 0
 
+    if arguments.subcommand == "discover":
+        snapshot = discover_site(inventory_store, cwd=Path.cwd())
+        if arguments.json:
+            print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
+        else:
+            print(format_inventory(snapshot, discovered=True))
+        return 0
+
+    if arguments.subcommand == "inventory":
+        if inventory_store.count() == 0:
+            print(
+                "bourne: No inventory snapshots are recorded. Run 'bourne discover' first.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            snapshot = resolve_inventory(inventory_store, arguments.reference)
+        except InventoryReferenceError as exc:
+            print(f"bourne: {exc}", file=sys.stderr)
+            return 2
+        if arguments.find is not None:
+            matches = find_capabilities(snapshot, arguments.find)
+            if arguments.json:
+                print(
+                    json.dumps(
+                        {
+                            "snapshot_id": snapshot.id,
+                            "query": {"kind": "exact-capability-name", "name": arguments.find},
+                            "matches": [item.to_dict() for item in matches],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(format_capability_matches(arguments.find, matches))
+        elif arguments.json:
+            print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
+        else:
+            print(format_inventory(snapshot))
+        return 0
 
     parser.error(f"unsupported command: {arguments.subcommand}")
     return 2
