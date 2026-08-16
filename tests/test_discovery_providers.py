@@ -137,6 +137,9 @@ class StorageAndIdentityTests(unittest.TestCase):
             sibling_user = root / "other-readable-user"
             sibling_user.mkdir()
             (sibling_user / "private-result.dat").write_text("not in scope", encoding="utf-8")
+            root_path = str(root.resolve(strict=False))
+            scratch_path = str(scratch.resolve(strict=False))
+            sibling_user_path = str(sibling_user.resolve(strict=False))
             environment = {
                 "HOME": str(root), "PROJECT": str(root), "SCRATCH": str(scratch),
                 "TMPDIR": str(scratch), "TOKEN": "must-not-persist",
@@ -149,11 +152,11 @@ class StorageAndIdentityTests(unittest.TestCase):
 
         by_path = {item.path: item for item in output.storage}
         self.assertEqual(len(by_path), 2)
-        self.assertNotIn(str(sibling_user), by_path)
+        self.assertNotIn(sibling_user_path, by_path)
         self.assertNotIn("private-result.dat", json.dumps([item.metadata for item in output.storage]))
-        self.assertEqual(by_path[str(root)].role_hints, ["cwd", "home", "project"])
-        self.assertEqual(by_path[str(scratch)].role_hints, ["scratch", "temporary"])
-        self.assertEqual(by_path[str(root)].metadata["policy"], "unknown")
+        self.assertEqual(by_path[root_path].role_hints, ["cwd", "home", "project"])
+        self.assertEqual(by_path[scratch_path].role_hints, ["scratch", "temporary"])
+        self.assertEqual(by_path[root_path].metadata["policy"], "unknown")
         self.assertNotIn("must-not-persist", json.dumps([item.metadata for item in output.storage]))
         self.assertFalse(output.metadata["recursive_scan"])
 
@@ -161,11 +164,12 @@ class StorageAndIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             missing = root / "missing-scratch"
+            missing_path = str(missing.resolve(strict=False))
             output = StorageProvider().discover(
                 request(root, {"HOME": str(root), "SCRATCH": str(missing)}), state()
             )
 
-        resource = next(item for item in output.storage if item.path == str(missing))
+        resource = next(item for item in output.storage if item.path == missing_path)
         self.assertFalse(resource.exists)
         self.assertIsNone(resource.readable)
         self.assertEqual(resource.metadata["policy"], "unknown")
@@ -175,10 +179,11 @@ class StorageAndIdentityTests(unittest.TestCase):
             root = Path(directory)
             blocked = root / "blocked"
             blocked.mkdir()
+            blocked_path = blocked.resolve(strict=False)
             original_stat = Path.stat
 
             def guarded(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
-                if path == blocked:
+                if path == blocked_path:
                     raise PermissionError("inspection denied")
                 return original_stat(path, *args, **kwargs)
 
@@ -187,7 +192,7 @@ class StorageAndIdentityTests(unittest.TestCase):
                     request(root, {"HOME": str(root), "SCRATCH": str(blocked)}), state()
                 )
 
-        resource = next(item for item in output.storage if item.path == str(blocked))
+        resource = next(item for item in output.storage if item.path == str(blocked_path))
         self.assertEqual(output.status, "partial")
         self.assertIsNone(resource.exists)
         self.assertIn("inspection denied", output.diagnostic or "")
@@ -195,11 +200,12 @@ class StorageAndIdentityTests(unittest.TestCase):
     def test_identity_reads_current_groups_without_enumerating_members(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            root_path = str(root.resolve(strict=False))
             with patch("grp.getgrall", side_effect=AssertionError("must not enumerate groups")):
                 output = IdentityProvider().discover(request(root), state())
 
         self.assertIsNotNone(output.identity)
-        self.assertEqual(output.identity.home, str(root))  # type: ignore[union-attr]
+        self.assertEqual(output.identity.home, root_path)  # type: ignore[union-attr]
 
 
 class EnvironmentProviderTests(unittest.TestCase):
@@ -247,13 +253,15 @@ class EnvironmentProviderTests(unittest.TestCase):
             (local / "bin").mkdir(parents=True)
             (local / "pyvenv.cfg").write_text("home = test\n", encoding="utf-8")
             executable(local / "bin" / "python")
+            active_path = str(active.resolve(strict=False))
+            local_path = str(local.resolve(strict=False))
             output = VirtualenvProvider().discover(
                 request(root, {"HOME": str(root), "VIRTUAL_ENV": str(active)}), state()
             )
 
         by_locator = {item.locator: item for item in output.contexts}
-        self.assertIn(str(active), by_locator)
-        self.assertIn(str(local), by_locator)
+        self.assertIn(active_path, by_locator)
+        self.assertIn(local_path, by_locator)
         self.assertEqual(output.status, "partial")
         self.assertFalse(output.metadata["home_crawl"])
         self.assertIn("python", {item.name for item in output.capabilities})
