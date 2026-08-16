@@ -17,7 +17,7 @@ from .models import (
     SystemProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = (
     """
@@ -113,6 +113,191 @@ _MIGRATION_1_TO_2 = (
     """,
 )
 
+_MIGRATION_2_TO_3 = (
+    """
+    CREATE TABLE inventory_snapshots (
+        id TEXT PRIMARY KEY,
+        captured_at TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        site_label TEXT,
+        metadata_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX inventory_snapshots_captured_at
+    ON inventory_snapshots (captured_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE inventory_identities (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL UNIQUE
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        username TEXT,
+        uid INTEGER,
+        primary_gid INTEGER,
+        groups_json TEXT NOT NULL,
+        home TEXT,
+        provider TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE discovered_targets (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        parent_target_id TEXT REFERENCES discovered_targets(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        role TEXT NOT NULL,
+        name TEXT NOT NULL,
+        locator TEXT,
+        state TEXT NOT NULL,
+        visible INTEGER CHECK (visible IS NULL OR visible IN (0, 1)),
+        authorization TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX discovered_targets_snapshot_role
+    ON discovered_targets (snapshot_id, role, kind, name)
+    """,
+    """
+    CREATE TABLE storage_resources (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        target_id TEXT REFERENCES discovered_targets(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        role_hints_json TEXT NOT NULL,
+        exists_now INTEGER CHECK (exists_now IS NULL OR exists_now IN (0, 1)),
+        readable INTEGER CHECK (readable IS NULL OR readable IN (0, 1)),
+        writable INTEGER CHECK (writable IS NULL OR writable IN (0, 1)),
+        searchable INTEGER CHECK (searchable IS NULL OR searchable IN (0, 1)),
+        mount_point TEXT,
+        filesystem_type TEXT,
+        mount_read_only INTEGER
+            CHECK (mount_read_only IS NULL OR mount_read_only IN (0, 1)),
+        provider TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        UNIQUE (snapshot_id, path)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX storage_resources_snapshot
+    ON storage_resources (snapshot_id, path)
+    """,
+    """
+    CREATE TABLE scheduler_resources (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        access_target_id TEXT REFERENCES discovered_targets(id) ON DELETE CASCADE,
+        family TEXT NOT NULL,
+        state TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        current_allocation_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX scheduler_resources_snapshot_family
+    ON scheduler_resources (snapshot_id, family)
+    """,
+    """
+    CREATE TABLE scheduler_execution_targets (
+        scheduler_id TEXT NOT NULL
+            REFERENCES scheduler_resources(id) ON DELETE CASCADE,
+        target_id TEXT NOT NULL
+            REFERENCES discovered_targets(id) ON DELETE CASCADE,
+        PRIMARY KEY (scheduler_id, target_id)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE discovered_execution_contexts (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        target_id TEXT REFERENCES discovered_targets(id) ON DELETE CASCADE,
+        context_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        locator TEXT,
+        state TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        UNIQUE (snapshot_id, context_key)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX discovered_contexts_snapshot_kind
+    ON discovered_execution_contexts (snapshot_id, kind, name)
+    """,
+    """
+    CREATE TABLE capabilities (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        context_id TEXT NOT NULL
+            REFERENCES discovered_execution_contexts(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        locator TEXT,
+        observation_state TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        classifications_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX capabilities_snapshot_name
+    ON capabilities (snapshot_id, name, kind, context_id)
+    """,
+    """
+    CREATE INDEX capabilities_context
+    ON capabilities (context_id, kind, name)
+    """,
+    """
+    CREATE TABLE discovery_evidence (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        subject_type TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        evidence_type TEXT NOT NULL,
+        observed_now INTEGER NOT NULL CHECK (observed_now IN (0, 1)),
+        historical_only INTEGER NOT NULL CHECK (historical_only IN (0, 1)),
+        details_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX discovery_evidence_subject
+    ON discovery_evidence (snapshot_id, subject_type, subject_id)
+    """,
+    """
+    CREATE TABLE provider_results (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL
+            CHECK (status IN ('complete', 'unavailable', 'partial', 'error', 'timeout')),
+        started_at TEXT NOT NULL,
+        ended_at TEXT NOT NULL,
+        duration_seconds REAL NOT NULL CHECK (duration_seconds >= 0),
+        diagnostic TEXT,
+        truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+        metadata_json TEXT NOT NULL,
+        UNIQUE (snapshot_id, provider)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX provider_results_snapshot_status
+    ON provider_results (snapshot_id, status, provider)
+    """,
+)
+
 
 class ExperimentNotFound(LookupError):
     pass
@@ -179,6 +364,11 @@ class ExperimentStore:
                     for statement in _MIGRATION_1_TO_2:
                         connection.execute(statement)
                     connection.execute("PRAGMA user_version = 2")
+                    version = 2
+                if version == 2:
+                    for statement in _MIGRATION_2_TO_3:
+                        connection.execute(statement)
+                    connection.execute("PRAGMA user_version = 3")
         except sqlite3.Error as exc:
             raise DatabaseMigrationError(f"could not migrate Bourne database: {exc}") from exc
 
