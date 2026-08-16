@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,8 @@ from bourneprov.discovery_providers import (
     ProviderOutput,
 )
 from bourneprov.inventory_references import resolve_inventory
+from bourneprov.ids import new_ulid
+from bourneprov.inventory_models import Capability, DiscoveryEvidence, InventorySnapshot
 from bourneprov.inventory_storage import InventoryStore
 from tests.fixtures import system_provenance
 
@@ -50,6 +53,135 @@ class InventoryStorageTests(unittest.TestCase):
                     CurrentEnvironmentProvider(),
                 ],
             )
+
+    def _unsaved_discovery(self, store: InventoryStore, root: Path) -> InventorySnapshot:
+        with patch.object(store, "save") as save:
+            snapshot = self._discover(store, root)
+        save.assert_called_once_with(snapshot)
+        return snapshot
+
+    def _with_capability(
+        self, snapshot: InventorySnapshot, *, historical: bool = False
+    ) -> InventorySnapshot:
+        capability = Capability(
+            id=new_ulid(), snapshot_id=snapshot.id,
+            context_id=snapshot.execution_contexts[0].id,
+            kind="executable", name="fixture-solver", locator="/opt/fixture-solver",
+            observation_state="historical" if historical else "observed",
+            provider="fixture",
+        )
+        evidence = DiscoveryEvidence(
+            id=new_ulid(), snapshot_id=snapshot.id, subject_type="capability",
+            subject_id=capability.id, provider="fixture",
+            evidence_type="fixture_history" if historical else "fixture_observation",
+            observed_now=not historical, historical_only=historical,
+        )
+        return replace(snapshot, capabilities=[capability], evidence=[evidence])
+
+    def test_valid_target_evidence_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._unsaved_discovery(store, root)
+            target_evidence = next(
+                item for item in snapshot.evidence if item.subject_type == "target"
+            )
+            snapshot = replace(snapshot, evidence=[target_evidence])
+            store.save(snapshot)
+            reloaded = store.get(snapshot.id)
+
+        self.assertEqual(reloaded.evidence, [target_evidence])
+
+    def test_valid_capability_evidence_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._with_capability(self._unsaved_discovery(store, root))
+            store.save(snapshot)
+            reloaded = store.get(snapshot.id)
+
+        self.assertEqual(reloaded.capabilities, snapshot.capabilities)
+        self.assertEqual(reloaded.evidence, snapshot.evidence)
+
+    def test_valid_historical_evidence_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._with_capability(
+                self._unsaved_discovery(store, root), historical=True
+            )
+            store.save(snapshot)
+            reloaded = store.get(snapshot.id)
+
+        self.assertFalse(reloaded.evidence[0].observed_now)
+        self.assertTrue(reloaded.evidence[0].historical_only)
+
+    def test_unknown_evidence_subject_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._unsaved_discovery(store, root)
+            evidence = next(
+                item for item in snapshot.evidence if item.subject_type == "target"
+            )
+            snapshot = replace(
+                snapshot, evidence=[replace(evidence, subject_id=new_ulid())]
+            )
+
+            with self.assertRaisesRegex(ValueError, "declared type"):
+                store.save(snapshot)
+
+    def test_evidence_subject_id_of_wrong_type_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._unsaved_discovery(store, root)
+            evidence = next(
+                item for item in snapshot.evidence if item.subject_type == "target"
+            )
+            snapshot = replace(
+                snapshot,
+                evidence=[
+                    replace(
+                        evidence, subject_type="capability",
+                        subject_id=snapshot.targets[0].id,
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "declared type"):
+                store.save(snapshot)
+
+    def test_evidence_from_another_snapshot_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._unsaved_discovery(store, root)
+            evidence = next(
+                item for item in snapshot.evidence if item.subject_type == "target"
+            )
+            snapshot = replace(
+                snapshot, evidence=[replace(evidence, snapshot_id=new_ulid())]
+            )
+
+            with self.assertRaisesRegex(ValueError, "snapshot IDs"):
+                store.save(snapshot)
+
+    def test_current_and_historical_evidence_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = InventoryStore(root / "bourne.sqlite3")
+            snapshot = self._unsaved_discovery(store, root)
+            evidence = next(
+                item for item in snapshot.evidence if item.subject_type == "target"
+            )
+            snapshot = replace(
+                snapshot,
+                evidence=[replace(evidence, observed_now=True, historical_only=True)],
+            )
+
+            with self.assertRaisesRegex(ValueError, "observed now and historical only"):
+                store.save(snapshot)
 
     def test_snapshot_creation_persistence_reopen_and_queryable_topology(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

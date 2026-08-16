@@ -30,6 +30,30 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _validate_evidence(snapshot: InventorySnapshot) -> None:
+    subject_ids = {
+        "identity": set() if snapshot.identity is None else {snapshot.identity.id},
+        "target": {item.id for item in snapshot.targets},
+        "storage": {item.id for item in snapshot.storage},
+        "scheduler": {item.id for item in snapshot.schedulers},
+        "execution_context": {item.id for item in snapshot.execution_contexts},
+        "capability": {item.id for item in snapshot.capabilities},
+    }
+    for evidence in snapshot.evidence:
+        if evidence.observed_now and evidence.historical_only:
+            raise ValueError(
+                "evidence cannot be both observed now and historical only"
+            )
+        if evidence.subject_type not in subject_ids:
+            raise ValueError(
+                f"unsupported evidence subject type: {evidence.subject_type}"
+            )
+        if evidence.subject_id not in subject_ids[evidence.subject_type]:
+            raise ValueError(
+                "evidence subject must belong to its declared type in the snapshot"
+            )
+
+
 class InventoryStore:
     """A queryable repository sharing Bourne's existing SQLite database."""
 
@@ -87,6 +111,7 @@ class InventoryStore:
             for item in snapshot.schedulers
         ):
             raise ValueError("scheduler target relationships must belong to the snapshot")
+        _validate_evidence(snapshot)
 
         with self._connection() as connection:
             connection.execute(
