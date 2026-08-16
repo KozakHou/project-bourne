@@ -1,6 +1,6 @@
 # Compute-site discovery
 
-Project Bourne v0.3 discovery records what the current researcher's execution
+Project Bourne v0.3.0 discovery records what the current researcher's execution
 surface looked like at a particular time. It does not choose an environment,
 submit a job, or certify that a workload will run.
 
@@ -26,12 +26,14 @@ current access target
               +---- visible aggregate execution-target classes
 ~~~
 
-The simplest valid site is a laptop, workstation, or personal GPU system with
-direct contexts and no scheduler. On an HPC access target, read-only scheduler
-metadata can add partition/queue target classes without scanning or connecting
-to compute nodes. Bourne does not invent a site name or call a host a login node
-from its hostname or from scheduler-client presence. An active Slurm/PBS
-allocation is recorded only from direct allow-listed allocation evidence.
+The simplest valid site is a laptop, desktop workstation, personal GPU or
+DGX-class machine, or shared laboratory workstation with direct contexts and no
+scheduler. Institutional HPC and supercomputer-style scheduler environments
+use the same model. On an HPC access target, read-only scheduler metadata can
+add partition/queue target classes without scanning or connecting to compute
+nodes. Bourne does not invent a site name or call a host a login node from its
+hostname or from scheduler-client presence. An active Slurm/PBS allocation is
+recorded only from direct allow-listed allocation evidence.
 
 Discovered execution contexts are candidate locations such as the current
 system environment, Conda environments, virtualenvs, loaded-module state, and
@@ -39,6 +41,11 @@ metadata-level containers. They are intentionally distinct from the v0.2
 `ExecutionContext`, which records where one experiment actually ran.
 
 ## Authorized execution surface
+
+Bourne maps the current researcher's authorized execution surface from evidence
+available to the current process, but it does not claim that every visible
+resource is authorized. Where authorization is not directly established, the
+recorded value remains `unknown`.
 
 Discovery is scoped to the current process identity. The identity provider may
 record the current username, POSIX IDs, current supplementary group IDs/names,
@@ -78,6 +85,10 @@ Every capability has explicit evidence. Filesystem observations are
 `observed_now`. Bourne history records completed, failed, and interrupted
 observations with last-seen metadata as `historical_only`; historical success
 is never promoted to current availability or authorization.
+
+Before a snapshot is persisted, every evidence reference is validated against
+a subject of the declared type in that same snapshot. Evidence cannot be both
+`observed_now` and `historical_only`.
 
 System observations retain the distinction between NVIDIA driver-supported
 CUDA metadata and a separately observed `nvcc` executable.
@@ -131,6 +142,8 @@ The following distinctions are permanent:
 - container existence does not reveal its internal software;
 - historical use does not establish present availability or permission;
 - storage role hints do not establish policy.
+- the current access target is not the same as a scheduler-visible compute
+  target class.
 
 The target/context/storage relationships are queryable so a future workload
 resolver can consider direct or scheduler-mediated execution without changing

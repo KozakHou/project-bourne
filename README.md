@@ -9,9 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-The latest public release is Project Bourne v0.2.0. Install it from PyPI; the
-current repository is developing v0.3.0 and can briefly be ahead of the
-published package:
+The repository version is Project Bourne v0.3.0. PyPI publication follows the
+merge: until v0.3.0 is published, the command below installs the latest public
+release, v0.2.0; afterward it installs v0.3.0.
 
 ~~~bash
 python -m pip install bourneprov
@@ -33,11 +33,12 @@ bourne run mpirun -np 64 ./solver
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
 
-## Compute-site discovery (v0.3 development)
+## Compute-site discovery (v0.3.0)
 
 Bourne can take an immutable, local snapshot of the execution surface visible
-to your current identity. Install this repository checkout (`python -m pip
-install .`) to try the development command set:
+to your current identity. Before v0.3.0 is published to PyPI, install this
+repository checkout (`python -m pip install .`) to use the release-candidate
+command set:
 
 ~~~bash
 bourne discover
@@ -51,13 +52,17 @@ user-relevant storage paths, direct execution contexts, generic PATH
 executables, optional Conda/virtualenv/container/module contexts, safe system
 capabilities, Bourne history, and read-only Slurm/PBS target-class summaries
 when available. An unknown executable is recorded generically without being
-run. A laptop without a scheduler is a complete and normal compute site.
+run. Laptops, desktop and GPU workstations, DGX-class personal machines, shared
+laboratory systems, and scheduler-backed HPC sites are all valid compute
+sites. A scheduler-free machine is complete in its own right.
 
 Discovery is observational: an executable is not verified workload
 compatibility, a visible scheduler partition is not proof of submission
 authorization, and a storage role hint is not a retention or backup policy.
-Inventories remain local and no provider scans other users, compute nodes, or
-container contents. See [Compute-site discovery](docs/COMPUTE_SITE_DISCOVERY.md)
+Inventories remain local. Providers do not traverse other users' homes, crawl
+shared storage, inspect SSH credentials or container secrets, dump arbitrary
+environment variables, SSH into compute nodes, submit or cancel scheduler
+jobs, or modify environments. See [Compute-site discovery](docs/COMPUTE_SITE_DISCOVERY.md)
 for the exact topology, evidence, limits, and security semantics.
 
 ## Artifacts and lineage
@@ -199,10 +204,11 @@ readable. Unknown or newer schema versions fail explicitly; Bourne never
 resets an existing database. Each new discovery creates a separate immutable
 snapshot.
 
-## Development
+## Release-candidate validation
 
-The repository development version is 0.3.0.dev0. PyPI publication is a
-separate release step. The runtime has zero third-party dependencies.
+The repository version is 0.3.0. PyPI publication is a separate post-merge
+release step; during that gap, PyPI serves v0.2.0. The runtime has zero
+third-party dependencies.
 
 Run the source-tree tests with:
 
