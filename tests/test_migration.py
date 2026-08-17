@@ -22,6 +22,9 @@ from bourneprov.storage import (
     DatabaseMigrationError,
     ExperimentStore,
     UnsupportedDatabaseVersion,
+    _MIGRATION_1_TO_2,
+    _MIGRATION_2_TO_3,
+    _SCHEMA_V1,
 )
 from tests.fixtures import experiment, system_provenance
 
@@ -85,6 +88,81 @@ def create_v1_database(path: Path) -> list[str]:
 
 
 class MigrationTests(unittest.TestCase):
+    def test_unreleased_schema_three_migrates_transactionally_to_schema_four(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "schema-three.sqlite3"
+            with closing(sqlite3.connect(database)) as connection:
+                with connection:
+                    for statement in (*_SCHEMA_V1, *_MIGRATION_1_TO_2, *_MIGRATION_2_TO_3):
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO inventory_snapshots VALUES (?, ?, ?, ?, ?)",
+                        (
+                            "01HV030" + "0" * 19,
+                            "2026-06-01T00:00:00.000000Z", "/work", "released-v0.3",
+                            '{"schema_version":3}',
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO discovered_targets (
+                            id, snapshot_id, parent_target_id, kind, role, name,
+                            locator, state, visible, authorization, provider, metadata_json
+                        ) VALUES (?, ?, NULL, 'host', 'access_target', 'v03-host',
+                                  'local://v03-host', 'observed', 1,
+                                  'observed-authorized', 'fixture', '{}')
+                        """,
+                        ("01HTARG" + "1" * 19, "01HV030" + "0" * 19),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO discovered_execution_contexts (
+                            id, snapshot_id, target_id, context_key, kind, name,
+                            locator, state, provider, metadata_json
+                        ) VALUES (?, ?, ?, 'current', 'system', 'current environment',
+                                  'local://v03-host', 'active', 'fixture', '{}')
+                        """,
+                        (
+                            "01HCONT" + "2" * 19, "01HV030" + "0" * 19,
+                            "01HTARG" + "1" * 19,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO capabilities (
+                            id, snapshot_id, context_id, kind, name, locator,
+                            observation_state, provider, classifications_json, metadata_json
+                        ) VALUES (?, ?, ?, 'executable', 'solver', '/opt/solver',
+                                  'observed', 'fixture', '[]', '{}')
+                        """,
+                        (
+                            "01HCAPA" + "3" * 19, "01HV030" + "0" * 19,
+                            "01HCONT" + "2" * 19,
+                        ),
+                    )
+                    connection.execute("PRAGMA user_version = 3")
+
+            ExperimentStore(database).initialize()
+            snapshot = InventoryStore(database).get("01HV030" + "0" * 19)
+            with closing(sqlite3.connect(database)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+                foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+        self.assertEqual(version, 4)
+        self.assertIn("execution_plans", tables)
+        self.assertIn("execution_events", tables)
+        self.assertEqual(snapshot.current_target.name, "v03-host")  # type: ignore[union-attr]
+        self.assertEqual(snapshot.capabilities[0].name, "solver")
+        self.assertEqual(integrity, "ok")
+        self.assertEqual(foreign_keys, [])
+
     def _migrate_released_fixture(self, version: str):
         fixture = Path(__file__).parent / "released_databases" / f"bourneprov-{version}.db"
         temporary = tempfile.TemporaryDirectory()
@@ -113,7 +191,7 @@ class MigrationTests(unittest.TestCase):
             foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         return database, before_ids, after, reopened, version_after, integrity, foreign_keys
 
-    def test_actual_released_v011_database_migrates_to_schema_three(self) -> None:
+    def test_actual_released_v011_database_migrates_to_schema_four(self) -> None:
         (
             _database, before_ids, after, snapshot, version, integrity, foreign_keys
         ) = self._migrate_released_fixture("0.1.1")
@@ -121,13 +199,13 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual({item.status for item in after}, {"completed", "failed", "interrupted"})
         self.assertEqual({item.id for item in after}, set(before_ids))
         self.assertTrue(all(item.schema_version == 1 for item in after))
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertEqual(integrity, "ok")
         self.assertEqual(foreign_keys, [])
         self.assertEqual(len(snapshot.targets), 1)
         self.assertGreaterEqual(len(snapshot.capabilities), 2)
 
-    def test_actual_released_v020_database_migrates_to_schema_three(self) -> None:
+    def test_actual_released_v020_database_migrates_to_schema_four(self) -> None:
         (
             database, before_ids, after, snapshot, version, integrity, foreign_keys
         ) = self._migrate_released_fixture("0.2.0")
@@ -141,7 +219,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual({item.capture_status for item in artifacts}, {"complete"})
         self.assertTrue(any(item is not None for item in lineage))
         self.assertTrue(all(item.execution_context.requested_executable for item in after))
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertEqual(integrity, "ok")
         self.assertEqual(foreign_keys, [])
         self.assertEqual(len(snapshot.execution_contexts), 1)
@@ -188,7 +266,7 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(
             all(item.execution_context.requested_executable == "solver" for item in old_records)
         )
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertIn("artifacts", tables)
         self.assertIn("experiment_lineage", tables)
         self.assertIn("inventory_snapshots", tables)
@@ -198,6 +276,13 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("discovered_execution_contexts", tables)
         self.assertIn("capabilities", tables)
         self.assertIn("provider_results", tables)
+        self.assertIn("workload_specs", tables)
+        self.assertIn("execution_plans", tables)
+        self.assertIn("execution_attempts", tables)
+        self.assertIn("scheduler_jobs", tables)
+        self.assertIn("allocations", tables)
+        self.assertIn("execution_events", tables)
+        self.assertIn("execution_experiment_links", tables)
         self.assertIn("existence_state", artifact_columns)
         self.assertIn("capture_status", artifact_columns)
         self.assertNotIn("exists_state", artifact_columns)

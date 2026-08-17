@@ -52,6 +52,11 @@ Months later, even the original researcher may struggle to answer:
 
 Project Bourne exists to answer that question.
 
+The v0.4 development architecture adds a generic workload and execution-plan
+layer while preserving the experiment as the actual scientific execution.
+Scheduler submission, requested resources, observed allocation, and experiment
+provenance remain distinct; see [Workload planning and scheduler execution](WORKLOAD_EXECUTION.md).
+
 ---
 
 # Vision

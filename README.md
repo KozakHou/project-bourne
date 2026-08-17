@@ -9,9 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-The repository version is Project Bourne v0.3.0. PyPI publication follows the
-merge: until v0.3.0 is published, the command below installs the latest public
-release, v0.2.0; afterward it installs v0.3.0.
+The public release is Project Bourne v0.3.0. This repository is developing
+v0.4.0; `pip install bourneprov` installs the public v0.3.0 feature set until a
+later v0.4 release is published.
 
 ~~~bash
 python -m pip install bourneprov
@@ -32,6 +32,55 @@ bourne run mpirun -np 64 ./solver
 
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
+
+## Workload planning and execution (v0.4 development)
+
+The v0.4 source tree adds a durable planning layer over v0.3 inventories. To
+try it, install this repository checkout with `python -m pip install .`, then:
+
+~~~bash
+bourne discover
+
+bourne plan --backend direct -- python examples/demo.py
+bourne execute --backend direct -- python examples/demo.py
+
+bourne execution list
+bourne execution show @1
+~~~
+
+`bourne plan` never runs the scientific command and never performs discovery.
+It creates a framework-independent `WorkloadSpec`, compares its explicit and
+inferred requirements with an existing inventory, explains every candidate,
+and persists an immutable `ExecutionPlan` only when selection is unambiguous.
+Use explicit resource and placement constraints when needed:
+
+~~~bash
+bourne plan \
+  --backend slurm \
+  --target gpu \
+  --cpus 16 \
+  --gpus 4 \
+  --nodes 1 \
+  --memory 64G \
+  --walltime 2h \
+  -- ./solver case.yaml
+~~~
+
+Direct execution reuses Bourne's existing live-output, process-group, artifact,
+lineage, and experiment-provenance machinery. Slurm and PBS plans use a
+self-contained Bourne worker staged with the plan. The worker performs
+preflight and records the actual allocated host and scientific experiment;
+the access-side controller imports its bounded JSON result transactionally.
+No compute-node SSH or preinstalled `bourneprov` package is required, although
+the compute allocation must provide Python 3 and visibility of the staging and
+working directories.
+
+Submission is not an experiment, scheduler completion is not scientific
+success, and requested resources are not allocated resources. Bourne records
+these as separate durable facts. Cancellation accepts a Bourne execution
+reference—not an arbitrary scheduler job ID—and checks the submitting identity.
+See [Workload planning and scheduler execution](docs/WORKLOAD_EXECUTION.md) for
+the exact model, safety boundary, and current limitations.
 
 ## Compute-site discovery (v0.3.0)
 
@@ -197,18 +246,18 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1 or v0.2.0 database performs deterministic transactional
-migrations through schema 3. Existing completed, failed, and interrupted
+Opening a v0.1.1, v0.2.0, or v0.3.0 database with the v0.4 source performs
+deterministic transactional migrations through schema 4. Existing completed,
+failed, and interrupted
 experiments, artifacts, lineage, and execution-context observations remain
 readable. Unknown or newer schema versions fail explicitly; Bourne never
 resets an existing database. Each new discovery creates a separate immutable
 snapshot.
 
-## Release-candidate validation
+## Development validation
 
-The repository version is 0.3.0. PyPI publication is a separate post-merge
-release step; during that gap, PyPI serves v0.2.0. The runtime has zero
-third-party dependencies.
+The repository version is 0.4.0.dev0. The runtime has zero third-party
+dependencies. v0.4 is not yet the PyPI release.
 
 Run the source-tree tests with:
 
@@ -218,6 +267,7 @@ PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
 
 stdout and stderr are still accumulated in memory before final persistence.
 Disk-spooled experiment logs, automatic artifact discovery, artifact archival,
-workload inference, environment resolution/selection, scheduler submission,
-remote execution, profiling, scientific verification, MCP, and agents remain
-future work. See docs/VISION.md for the longer-term direction.
+automatic dependency installation, automatic module loading, container
+orchestration, SSH execution, remote copying, profiling, scientific
+verification, MCP, and agents remain future work. See docs/VISION.md for the
+longer-term direction.
