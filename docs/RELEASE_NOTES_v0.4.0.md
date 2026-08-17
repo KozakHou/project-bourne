@@ -11,6 +11,10 @@ Status: development (`0.4.0.dev0`), not published.
 - Durable execution, scheduler-job, allocation, event, and experiment links
 - Direct execution through existing Bourne provenance semantics
 - Slurm and PBS submission/status/wait/cancel/collection boundaries
+- Exact-job Slurm terminal observation through optional `sacct`, plus finite
+  unobservable-job handling for Slurm and PBS
+- POSIX scheduler ownership derived from effective UID/password-database
+  identity rather than environment-controlled login variables
 - Portable stdlib-only zipapp worker for actual allocation-side provenance
 - Bounded JSON result validation and transactional import
 - Schema 4 migration preserving schema 1–3 history

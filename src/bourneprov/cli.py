@@ -189,7 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
     execution_show.add_argument("--json", action="store_true")
     execution_wait = execution_subparsers.add_parser("wait", help="wait for one scheduled execution")
     execution_wait.add_argument("reference")
-    execution_wait.add_argument("--poll", type=float, default=2.0)
+    execution_wait.add_argument(
+        "--poll", type=float, default=15.0,
+        help="initial scheduler poll interval in seconds (backs off to 60s)",
+    )
     execution_wait.add_argument("--timeout", type=float)
     execution_cancel = execution_subparsers.add_parser("cancel", help="cancel one Bourne-managed job")
     execution_cancel.add_argument("reference")

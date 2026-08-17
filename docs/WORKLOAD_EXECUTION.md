@@ -76,14 +76,36 @@ with `sbatch --parsable`, queries only the known job ID for the submitting user,
 waits, collects, and permits cancellation only through a Bourne execution
 record whose submitting identity matches the current identity.
 
+The active Slurm observation uses exact-job `squeue`. If that view no longer
+contains the job, Bourne attempts a bounded, read-only `sacct` lookup for the
+same job and user. Accounting is optional: unavailable accounting, an
+accounting error, or no exact accounting record remains explicit. If the job
+is unobservable and no worker result exists, waiting ends as
+`collection_failed`; Bourne does not infer scientific completion.
+
 `PBSBackend` provides the equivalent `qsub`, exact-job `qstat`, wait, collect,
 and identity-checked `qdel` lifecycle. Scheduler-specific parsing remains in
-the backend.
+the backend. A recognized exact-job "unknown job" response is recorded as
+unobservable. Without a result bundle it also ends as `collection_failed`;
+other status-command failures remain explicit query errors.
 
 All controller scheduler calls use explicit argv, `shell=False`, bounded
 stdout/stderr, and timeouts. Bourne never queries all users' jobs, modifies
 cluster configuration/reservations/QoS, escalates privileges, bypasses the
 scheduler, or SSHes to compute nodes.
+
+On POSIX, scheduler ownership uses the effective UID resolved through the
+system password database rather than `USER`, `LOGNAME`, `LNAME`, or `USERNAME`.
+The canonical username and effective UID are retained as lifecycle evidence.
+If no password entry exists, the numeric effective UID is used. Platforms
+without POSIX UID semantics use the standard-library login-name fallback and
+record that fallback source explicitly. Scheduler authorization remains the
+infrastructure's final enforcement layer.
+
+`execution wait` starts with a 15-second exact-job polling interval and backs
+off by 1.5x to 60 seconds. Tests and operators may configure the initial
+interval with `--poll`; queued and running jobs have no arbitrary default
+wall-clock timeout.
 
 ## Compute worker and collection
 
@@ -138,6 +160,9 @@ future SDK/MCP boundary.
   injection, container orchestration, SSH execution, retry, or policy inference.
 - Scheduler state parsing targets common Slurm/PBS interfaces and needs
   additional real-site validation across vendor variants.
+- Slurm accounting is optional and may be unavailable or delayed by site
+  configuration. Bourne records that uncertainty instead of inventing a
+  terminal scheduler outcome.
 - Output capture still accumulates stdout and stderr in memory before result
   serialization; large-log spooling remains future work.
 - Windows scheduler execution and native Windows process-tree supervision are

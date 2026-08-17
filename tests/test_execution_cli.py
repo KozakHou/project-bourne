@@ -95,12 +95,27 @@ class ExecutionCliTests(unittest.TestCase):
             store = ExecutionStore(database)
             execution = store.list_executions()[0]
             view = store.view(execution.id)
+            identity_event = next(
+                event for event in view.events if event.state == "identity_observed"
+            )
 
         self.assertEqual(code, 0)
         self.assertIn("direct-live", output.getvalue())
         self.assertEqual(view.execution.state, "completed")
         self.assertIsNotNone(view.experiment_id)
         self.assertEqual(view.plan.requested_resources, view.workload.resources)
+        self.assertEqual(
+            identity_event.details["username"], view.execution.submitting_identity
+        )
+        if os.name == "posix":
+            self.assertEqual(identity_event.details["effective_uid"], os.geteuid())
+            self.assertIn(
+                identity_event.details["source"],
+                {
+                    "posix_effective_uid_password_database",
+                    "posix_effective_uid_numeric",
+                },
+            )
 
     def test_execute_existing_plan_and_lifecycle_list_show_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import getpass
 from pathlib import Path
 from typing import Sequence
 
 from .backends import (
+    DEFAULT_SCHEDULER_POLL_SECONDS,
     DirectBackend,
     ExecutionBackend,
     PBSBackend,
@@ -17,6 +17,7 @@ from .backends import (
 from .inventory_models import InventorySnapshot
 from .inventory_storage import InventoryStore
 from .ids import new_ulid
+from .identity import current_process_identity
 from .resolver import resolve_execution
 from .worker_result import WorkerResult
 from .workload import inspect_workload, utc_now
@@ -86,13 +87,17 @@ class ExecutionService:
             raise PlanningError("plan inventory does not match the supplied snapshot")
         workload = self.store.get_workload(plan.workload_id)
         now = utc_now()
+        identity = current_process_identity()
         execution = ExecutionAttempt(
             id=new_ulid(),
             plan_id=plan.id, backend=plan.backend, state="planned",
             created_at=now, updated_at=now,
-            submitting_identity=_identity(),
+            submitting_identity=identity.username,
         )
         self.store.create_execution(execution)
+        self.store.record_execution_event(
+            execution.id, "identity_observed", now, identity.evidence()
+        )
         selected_backend = backend or self.backend(plan.backend)
         try:
             return selected_backend.execute(execution, plan, workload, inventory)
@@ -124,7 +129,7 @@ class ExecutionService:
         self,
         execution_id: str,
         *,
-        poll_seconds: float = 2.0,
+        poll_seconds: float = DEFAULT_SCHEDULER_POLL_SECONDS,
         timeout_seconds: float | None = None,
         backend: SchedulerBackend | None = None,
     ) -> WorkerResult:
@@ -159,10 +164,3 @@ class ExecutionService:
         if not isinstance(backend, SchedulerBackend):
             raise PlanningError("direct execution is synchronous")
         return backend
-
-
-def _identity() -> str:
-    try:
-        return getpass.getuser()
-    except (OSError, KeyError):
-        return "unknown"

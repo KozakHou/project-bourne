@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import subprocess
@@ -13,6 +12,7 @@ from unittest.mock import patch
 from bourneprov.backends import BackendError, PBSBackend, SlurmBackend, render_batch_script
 from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.ids import new_ulid
+from bourneprov.identity import ProcessIdentity, current_process_identity
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.resolver import resolve_execution
 from bourneprov.workload import inspect_workload, utc_now
@@ -46,7 +46,8 @@ class BackendTests(unittest.TestCase):
         now = utc_now()
         execution = ExecutionAttempt(
             id=new_ulid(), plan_id=plan.id, backend=family, state="planned",  # type: ignore[union-attr]
-            created_at=now, updated_at=now, submitting_identity=getpass.getuser(),
+            created_at=now, updated_at=now,
+            submitting_identity=current_process_identity().username,
         )
         store.create_execution(execution)
         return store, snapshot, workload, plan, execution
@@ -129,7 +130,10 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(state, "running")
         self.assertEqual(
             calls[1],
-            ["/usr/bin/squeue", "--noheader", "--jobs", "123", "--user", getpass.getuser(), "--format=%T"],
+            [
+                "/usr/bin/squeue", "--noheader", "--jobs", "123", "--user",
+                current_process_identity().username, "--format=%T",
+            ],
         )
 
     def test_cancel_rejects_identity_mismatch_before_scheduler_command(self) -> None:
@@ -145,7 +149,12 @@ class BackendTests(unittest.TestCase):
             backend = SlurmBackend(store, root / "stage", runner=runner)
             with patch("bourneprov.backends.shutil.which", return_value="/usr/bin/sbatch"):
                 backend.execute(execution, plan, workload, snapshot)  # type: ignore[arg-type]
-            with patch("bourneprov.backends._current_identity", return_value="someone-else"):
+            with patch(
+                "bourneprov.backends.current_process_identity",
+                return_value=ProcessIdentity(
+                    "someone-else", 2002, "posix_effective_uid_password_database"
+                ),
+            ):
                 with self.assertRaisesRegex(BackendError, "did not submit"):
                     backend.cancel(store.get_execution(execution.id))
 

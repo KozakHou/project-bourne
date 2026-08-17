@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import re
 import shlex
 import shutil
@@ -13,6 +12,7 @@ from typing import Callable, Protocol
 
 from .bounded_subprocess import BoundedCommandResult, run_bounded_command
 from .compute_worker import execute_plan
+from .identity import current_process_identity
 from .inventory_models import InventorySnapshot
 from .worker_bundle import build_worker_zipapp, write_staged_plan
 from .worker_result import WorkerResult, WorkerResultError, load_worker_result
@@ -22,6 +22,8 @@ from .workload_storage import ExecutionStore
 
 SCHEDULER_TIMEOUT_SECONDS = 10.0
 MAX_SCHEDULER_OUTPUT_BYTES = 1024 * 1024
+DEFAULT_SCHEDULER_POLL_SECONDS = 15.0
+MAX_SCHEDULER_POLL_SECONDS = 60.0
 _SAFE_SCHEDULER_NAME = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 _SAFE_SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
 _SAFE_PBS_JOB = re.compile(r"[A-Za-z0-9_.-]+\Z")
@@ -38,6 +40,30 @@ class Submission:
     scheduler_family: str
     job_id: str
     execution_id: str
+
+
+@dataclass(frozen=True)
+class SchedulerObservation:
+    """One exact-job scheduler observation and the provenance of that fact."""
+
+    state: str
+    source: str
+    observable: bool
+    terminal: bool
+    diagnostic: str | None = None
+
+    def details(self, family: str, job_id: str) -> dict[str, object]:
+        value: dict[str, object] = {
+            "scheduler_family": family,
+            "scheduler_state": self.state,
+            "job_id": job_id,
+            "observation_source": self.source,
+            "job_observable": self.observable,
+            "scheduler_terminal": self.terminal,
+        }
+        if self.diagnostic is not None:
+            value["diagnostic"] = self.diagnostic
+        return value
 
 
 class ExecutionBackend(Protocol):
@@ -141,7 +167,7 @@ class SchedulerBackend:
                 error=str(exc),
             )
             raise
-        identity = execution.submitting_identity or _current_identity()
+        identity = execution.submitting_identity or current_process_identity().username
         now = utc_now()
         self.store.save_scheduler_job(
             SchedulerJob(
@@ -158,18 +184,42 @@ class SchedulerBackend:
 
     def status(self, execution: ExecutionAttempt) -> str:
         job = self._known_job(execution)
+        observation = self._observe_and_record(execution, job)
+        return observation.state
+
+    def _observe_and_record(
+        self, execution: ExecutionAttempt, job: SchedulerJob
+    ) -> SchedulerObservation:
         executable = shutil.which(self.status_command)
         if executable is None:
-            raise BackendError(f"{self.status_command} executable is unavailable")
-        result = self._run([executable, *self._status_arguments(job.job_id, job.submitting_identity)])
-        state = self._parse_status(result)
+            error = BackendError(f"{self.status_command} executable is unavailable")
+            self._record_query_error(execution, job, error)
+            raise error
+        try:
+            observation = self._observe_job(job, executable)
+        except BackendError as exc:
+            self._record_query_error(execution, job, exc)
+            raise
         now = utc_now()
-        self.store.update_scheduler_job(execution.id, state, now)
+        self.store.update_scheduler_job(execution.id, observation.state, now)
         self.store.update_execution_state(
-            execution.id, _execution_state(state), now,
-            {"scheduler_state": state, "job_id": job.job_id},
+            execution.id, _execution_state(observation), now,
+            observation.details(self.name, job.job_id),
         )
-        return state
+        return observation
+
+    def _record_query_error(
+        self, execution: ExecutionAttempt, job: SchedulerJob, error: BackendError
+    ) -> None:
+        self.store.record_execution_event(
+            execution.id, "scheduler_query_error", utc_now(),
+            {
+                "scheduler_family": self.name,
+                "job_id": job.job_id,
+                "observation_source": "active",
+                "diagnostic": str(error)[:4096],
+            },
+        )
 
     def collect(self, execution: ExecutionAttempt) -> WorkerResult:
         staging = execution.staging_directory
@@ -200,36 +250,56 @@ class SchedulerBackend:
         self,
         execution: ExecutionAttempt,
         *,
-        poll_seconds: float = 2.0,
+        poll_seconds: float = DEFAULT_SCHEDULER_POLL_SECONDS,
         timeout_seconds: float | None = None,
     ) -> WorkerResult:
         started = time.monotonic()
+        delay = min(
+            MAX_SCHEDULER_POLL_SECONDS, max(0.05, float(poll_seconds))
+        )
         while True:
             current = self.store.get_execution(execution.id)
             try:
                 return self.collect(current)
             except BackendError:
                 pass
-            state = self.status(current)
-            if state in self.terminal_states:
+            job = self._known_job(current)
+            observation = self._observe_and_record(current, job)
+            if observation.terminal or not observation.observable:
                 try:
                     return self.collect(self.store.get_execution(execution.id))
                 except BackendError as exc:
                     now = utc_now()
+                    details = observation.details(self.name, job.job_id)
+                    details.update(
+                        {
+                            "result_bundle": "absent_or_invalid",
+                            "scientific_completion_established": False,
+                            "collection_diagnostic": str(exc)[:4096],
+                        }
+                    )
                     self.store.update_execution_state(
                         execution.id, "collection_failed", now,
-                        {"scheduler_state": state, "diagnostic": str(exc)},
+                        details,
                         error=str(exc),
                     )
-                    raise
+                    raise BackendError(
+                        "scientific completion was not established: " + str(exc)
+                    ) from exc
             if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
                 raise TimeoutError(f"timed out waiting for execution {execution.id}")
-            time.sleep(max(0.05, poll_seconds))
+            time.sleep(delay)
+            delay = min(MAX_SCHEDULER_POLL_SECONDS, delay * 1.5)
 
     def cancel(self, execution: ExecutionAttempt) -> None:
+        requester = current_process_identity()
         self.store.record_execution_event(
             execution.id, "cancellation_requested", utc_now(),
-            {"requested_by": _current_identity()},
+            {
+                "requested_by": requester.username,
+                "effective_uid": requester.effective_uid,
+                "identity_source": requester.source,
+            },
         )
         try:
             job = self._known_job(execution)
@@ -280,7 +350,7 @@ class SchedulerBackend:
         job = self.store.get_scheduler_job(execution.id)
         if job is None:
             raise BackendError("execution has no Bourne-managed scheduler job")
-        if job.submitting_identity != _current_identity():
+        if job.submitting_identity != current_process_identity().username:
             raise BackendError("current identity did not submit this Bourne job")
         return job
 
@@ -296,6 +366,11 @@ class SchedulerBackend:
     def _parse_status(self, result: BoundedCommandResult) -> str:
         raise NotImplementedError
 
+    def _observe_job(
+        self, job: SchedulerJob, status_executable: str
+    ) -> SchedulerObservation:
+        raise NotImplementedError
+
     def _cancel_arguments(self, job_id: str, identity: str) -> list[str]:
         raise NotImplementedError
 
@@ -308,7 +383,10 @@ class SlurmBackend(SchedulerBackend):
 
     @property
     def terminal_states(self) -> set[str]:
-        return {"completed", "failed", "cancelled", "timeout", "node_fail"}
+        return {
+            "completed", "failed", "cancelled", "timeout", "node_fail",
+            "out_of_memory", "preempted", "boot_fail", "deadline",
+        }
 
     def _submit_arguments(self, script_path: Path) -> list[str]:
         return ["--parsable", str(script_path)]
@@ -326,7 +404,78 @@ class SlurmBackend(SchedulerBackend):
         if result.returncode != 0 or result.timed_out:
             raise BackendError(f"Slurm status failed: {_failure_detail(result)}")
         value = result.stdout.strip().splitlines()
-        return "unknown" if not value else value[0].strip().casefold()
+        return "unobservable" if not value else _normalize_slurm_state(value[0])
+
+    def _observe_job(
+        self, job: SchedulerJob, status_executable: str
+    ) -> SchedulerObservation:
+        active_result = self._run(
+            [
+                status_executable,
+                *self._status_arguments(job.job_id, job.submitting_identity),
+            ]
+        )
+        active_state = self._parse_status(active_result)
+        if active_state != "unobservable":
+            return SchedulerObservation(
+                state=active_state,
+                source="active",
+                observable=True,
+                terminal=active_state in self.terminal_states,
+            )
+
+        accounting_executable = shutil.which("sacct")
+        if accounting_executable is None:
+            return SchedulerObservation(
+                state="unobservable",
+                source="accounting_unavailable",
+                observable=False,
+                terminal=False,
+                diagnostic=(
+                    "known job was absent from squeue and Slurm accounting "
+                    "was unavailable"
+                ),
+            )
+        accounting_result = self._run(
+            [
+                accounting_executable,
+                "--noheader",
+                "--parsable2",
+                "--jobs", job.job_id,
+                "--user", job.submitting_identity,
+                "--format=JobIDRaw,State",
+            ]
+        )
+        if accounting_result.returncode != 0 or accounting_result.timed_out:
+            return SchedulerObservation(
+                state="unobservable",
+                source="accounting_error",
+                observable=False,
+                terminal=False,
+                diagnostic=(
+                    "known job was absent from squeue and Slurm accounting "
+                    f"failed: {_failure_detail(accounting_result)}"
+                )[:4096],
+            )
+        accounting_state = _parse_slurm_accounting_state(
+            accounting_result.stdout, job.job_id
+        )
+        if accounting_state is None:
+            return SchedulerObservation(
+                state="unobservable",
+                source="terminal_accounting",
+                observable=False,
+                terminal=False,
+                diagnostic=(
+                    "known job was absent from squeue and had no exact sacct record"
+                ),
+            )
+        return SchedulerObservation(
+            state=accounting_state,
+            source="terminal_accounting",
+            observable=True,
+            terminal=accounting_state in self.terminal_states,
+        )
 
     def _cancel_arguments(self, job_id: str, identity: str) -> list[str]:
         return ["--user", identity, job_id]
@@ -365,6 +514,47 @@ class PBSBackend(SchedulerBackend):
             "Q": "queued", "H": "held", "R": "running", "E": "exiting",
             "F": "finished", "C": "completed", "S": "suspended",
         }.get(match.group(1).upper(), "unknown")
+
+    def _observe_job(
+        self, job: SchedulerJob, status_executable: str
+    ) -> SchedulerObservation:
+        result = self._run(
+            [
+                status_executable,
+                *self._status_arguments(job.job_id, job.submitting_identity),
+            ]
+        )
+        if result.timed_out:
+            raise BackendError(f"PBS status failed: {_failure_detail(result)}")
+        if result.returncode != 0:
+            if _pbs_job_is_unobservable(result):
+                return SchedulerObservation(
+                    state="unobservable",
+                    source="active",
+                    observable=False,
+                    terminal=False,
+                    diagnostic=(
+                        "known job was no longer observable through exact-job qstat"
+                    ),
+                )
+            raise BackendError(f"PBS status failed: {_failure_detail(result)}")
+        if not result.stdout.strip():
+            return SchedulerObservation(
+                state="unobservable",
+                source="active",
+                observable=False,
+                terminal=False,
+                diagnostic="exact-job qstat returned no observable job",
+            )
+        state = self._parse_status(result)
+        if state == "unknown":
+            raise BackendError("PBS status did not contain a recognized job_state")
+        return SchedulerObservation(
+            state=state,
+            source="active",
+            observable=True,
+            terminal=state in self.terminal_states,
+        )
 
     def _cancel_arguments(self, job_id: str, identity: str) -> list[str]:
         del identity
@@ -481,11 +671,15 @@ def _validate_result_against_plan(
         raise BackendError("worker experiment does not match the immutable plan")
 
 
-def _execution_state(scheduler_state: str) -> str:
+def _execution_state(observation: SchedulerObservation) -> str:
+    if not observation.observable:
+        return "scheduler_unobservable"
+    if observation.terminal:
+        return "scheduler_terminal"
     return {
         "pending": "queued", "queued": "queued", "configuring": "queued",
         "running": "running", "completing": "running", "cancelled": "cancelled",
-    }.get(scheduler_state, "submitted")
+    }.get(observation.state, "submitted")
 
 
 def _failure_detail(result: BoundedCommandResult) -> str:
@@ -494,11 +688,27 @@ def _failure_detail(result: BoundedCommandResult) -> str:
     return (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")[:4096]
 
 
-def _current_identity() -> str:
-    try:
-        return getpass.getuser()
-    except (OSError, KeyError):
-        return "unknown"
+def _normalize_slurm_state(value: str) -> str:
+    return value.strip().split(None, 1)[0].rstrip("+").replace("-", "_").casefold()
+
+
+def _parse_slurm_accounting_state(stdout: str, job_id: str) -> str | None:
+    for line in stdout.splitlines():
+        fields = line.split("|")
+        if len(fields) >= 2 and fields[0].strip() == job_id:
+            state = fields[1].strip()
+            return None if not state else _normalize_slurm_state(state)
+    return None
+
+
+def _pbs_job_is_unobservable(result: BoundedCommandResult) -> bool:
+    diagnostic = f"{result.stderr}\n{result.stdout}".casefold()
+    return bool(
+        re.search(
+            r"unknown\s+job(?:\s+id)?|job(?:\s+id)?\s+(?:does\s+not\s+exist|not\s+found)",
+            diagnostic,
+        )
+    )
 
 
 def _walltime(seconds: int) -> str:
