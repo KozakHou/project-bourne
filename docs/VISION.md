@@ -52,10 +52,12 @@ Months later, even the original researcher may struggle to answer:
 
 Project Bourne exists to answer that question.
 
-The v0.4 architecture adds a generic workload and execution-plan
-layer while preserving the experiment as the actual scientific execution.
-Scheduler submission, requested resources, observed allocation, and experiment
-provenance remain distinct; see [Workload planning and scheduler execution](WORKLOAD_EXECUTION.md).
+The v0.5 architecture adds a versioned execution-request boundary, truthful
+summary telemetry, and deterministic artifact verification over the generic
+v0.4 workload and execution-plan layer. User intent, workload understanding,
+planning, execution attempts, scheduler facts, actual experiments, telemetry,
+and verification remain distinct; see
+[Execution requests, telemetry, and verification](EXECUTION_REQUESTS.md).
 
 ---
 
@@ -1002,7 +1004,7 @@ Workload discovery + execution-context resolution
         │
         ▼
 v0.5
-Scientific verification
+Unified execution requests + telemetry + deterministic artifact verification
         │
         ▼
 v0.6

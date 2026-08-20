@@ -1,0 +1,19 @@
+{
+  "kind": "bourne.execution-request",
+  "version": 1,
+  "command": ["python", "train.py"],
+  "artifacts": {
+    "outputs": ["result.h5"]
+  },
+  "resources": {
+    "gpus": 4
+  },
+  "verification": {
+    "checks": [
+      {
+        "type": "output_exists",
+        "path": "result.h5"
+      }
+    ]
+  }
+}

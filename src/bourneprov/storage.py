@@ -17,7 +17,7 @@ from .models import (
     SystemProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 _SCHEMA_V1 = (
     """
@@ -408,6 +408,88 @@ _MIGRATION_3_TO_4 = (
     """,
 )
 
+_MIGRATION_4_TO_5 = (
+    """
+    CREATE TABLE execution_requests (
+        id TEXT PRIMARY KEY,
+        request_schema_version INTEGER NOT NULL
+            CHECK (request_schema_version = 1),
+        created_at TEXT NOT NULL,
+        base_directory TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        resolved_working_directory TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('cli', 'file', 'sdk')),
+        request_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX execution_requests_created_at
+    ON execution_requests (created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE execution_request_workload_links (
+        request_id TEXT PRIMARY KEY
+            REFERENCES execution_requests(id) ON DELETE RESTRICT,
+        workload_id TEXT NOT NULL UNIQUE
+            REFERENCES workload_specs(id) ON DELETE RESTRICT,
+        relationship TEXT NOT NULL CHECK (relationship = 'compiled_to')
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE telemetry_summaries (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL
+            REFERENCES execution_requests(id) ON DELETE RESTRICT,
+        execution_id TEXT NOT NULL UNIQUE
+            REFERENCES execution_attempts(id) ON DELETE RESTRICT,
+        experiment_id TEXT NOT NULL
+            REFERENCES experiments(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('complete', 'partial', 'unavailable')),
+        sources_json TEXT NOT NULL,
+        coverage_json TEXT NOT NULL,
+        summary_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX telemetry_summaries_request
+    ON telemetry_summaries (request_id, created_at, id)
+    """,
+    """
+    CREATE TABLE verification_runs (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL
+            REFERENCES execution_requests(id) ON DELETE RESTRICT,
+        execution_id TEXT NOT NULL UNIQUE
+            REFERENCES execution_attempts(id) ON DELETE RESTRICT,
+        experiment_id TEXT NOT NULL
+            REFERENCES experiments(id) ON DELETE RESTRICT,
+        aggregate_state TEXT NOT NULL
+            CHECK (aggregate_state IN ('passed', 'failed', 'unknown', 'not_requested')),
+        evaluated_at TEXT NOT NULL,
+        source TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX verification_runs_request
+    ON verification_runs (request_id, evaluated_at, id)
+    """,
+    """
+    CREATE TABLE verification_checks (
+        id TEXT PRIMARY KEY,
+        verification_run_id TEXT NOT NULL
+            REFERENCES verification_runs(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        check_type TEXT NOT NULL
+            CHECK (check_type IN ('output_exists', 'output_min_bytes', 'output_sha256')),
+        output_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('passed', 'failed', 'unknown')),
+        evidence_json TEXT NOT NULL,
+        UNIQUE (verification_run_id, ordinal)
+    ) WITHOUT ROWID
+    """,
+)
+
 
 class ExperimentNotFound(LookupError):
     pass
@@ -484,6 +566,11 @@ class ExperimentStore:
                     for statement in _MIGRATION_3_TO_4:
                         connection.execute(statement)
                     connection.execute("PRAGMA user_version = 4")
+                    version = 4
+                if version == 4:
+                    for statement in _MIGRATION_4_TO_5:
+                        connection.execute(statement)
+                    connection.execute("PRAGMA user_version = 5")
         except sqlite3.Error as exc:
             raise DatabaseMigrationError(f"could not migrate Bourne database: {exc}") from exc
 

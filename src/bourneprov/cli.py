@@ -15,6 +15,14 @@ from .completion import completion_script, experiment_candidates
 from .config import default_database_path
 from .discovery import discover_site, find_capabilities
 from .execution_service import ExecutionService, PlanningError
+from .execution_request import (
+    ExecutionRequest,
+    ExecutionRequestError,
+    encode_execution_request,
+    execution_request_from_cli,
+    execution_request_schema,
+    load_execution_request,
+)
 from .inventory_presentation import format_capability_matches, format_inventory
 from .inventory_references import InventoryReferenceError, resolve_inventory
 from .inventory_storage import InventoryStore
@@ -76,7 +84,8 @@ def _nonnegative(value: str) -> int:
 
 
 def _add_planning_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--backend", choices=("auto", "direct", "slurm", "pbs"), default="auto")
+    parser.add_argument("--request", metavar="FILE", help="load ExecutionRequest JSON")
+    parser.add_argument("--backend", choices=("auto", "direct", "slurm", "pbs"))
     parser.add_argument("--target")
     parser.add_argument("--context")
     parser.add_argument("--snapshot", default="latest", help="inventory ID, prefix, latest, or @N")
@@ -196,6 +205,27 @@ def build_parser() -> argparse.ArgumentParser:
     execution_wait.add_argument("--timeout", type=float)
     execution_cancel = execution_subparsers.add_parser("cancel", help="cancel one Bourne-managed job")
     execution_cancel.add_argument("reference")
+
+    request_parser = subparsers.add_parser(
+        "request", help="create, validate, or inspect ExecutionRequest JSON"
+    )
+    request_subparsers = request_parser.add_subparsers(
+        dest="request_command", required=True
+    )
+    request_init = request_subparsers.add_parser(
+        "init", help="create a bourne.json request without planning or execution"
+    )
+    request_init.add_argument("--output", default="bourne.json", metavar="FILE")
+    request_init.add_argument("command", nargs=argparse.REMAINDER)
+    request_validate = request_subparsers.add_parser(
+        "validate", help="validate a bounded request file"
+    )
+    request_validate.add_argument("path", nargs="?", default="bourne.json")
+    request_show = request_subparsers.add_parser(
+        "show", help="show validated and resolved request semantics"
+    )
+    request_show.add_argument("path", nargs="?", default="bourne.json")
+    request_subparsers.add_parser("schema", help="print ExecutionRequest JSON Schema v1")
     return parser
 
 
@@ -213,6 +243,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = ExperimentStore(default_database_path())
     inventory_store = InventoryStore(default_database_path())
     execution_store = ExecutionStore(default_database_path())
+
+    if arguments.subcommand == "request":
+        command_name = arguments.request_command
+        if command_name == "schema":
+            print(
+                json.dumps(
+                    execution_request_schema(),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if command_name == "init":
+            command = list(arguments.command)
+            if command and command[0] == "--":
+                command.pop(0)
+            if not command:
+                parser.error("bourne request init requires a command")
+            try:
+                request = execution_request_from_cli(command, cwd=Path.cwd())
+                output_path = Path(arguments.output)
+                with output_path.open("xb") as stream:
+                    stream.write(encode_execution_request(request))
+            except (ExecutionRequestError, OSError) as exc:
+                print(f"bourne: {exc}", file=sys.stderr)
+                return 2
+            print(f"Created {output_path}")
+            return 0
+        try:
+            request = load_execution_request(Path(arguments.path))
+        except ExecutionRequestError as exc:
+            print(f"bourne: {exc}", file=sys.stderr)
+            return 2
+        if command_name == "validate":
+            print(f"Valid ExecutionRequest v{request.request_schema_version}")
+            return 0
+        print(_format_request(request, persisted=False))
+        return 0
 
     if arguments.subcommand == "run":
         command = list(arguments.command)
@@ -327,6 +396,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.subcommand in {"plan", "execute"}:
         service = ExecutionService(execution_store, inventory_store)
+        if (
+            arguments.subcommand == "execute"
+            and arguments.plan is not None
+            and arguments.request is not None
+        ):
+            parser.error("--plan cannot be combined with --request")
+        if arguments.request is not None and _request_conflicts(arguments):
+            parser.error(
+                "--request cannot be combined with command, artifact, resource, "
+                "placement, or lineage flags"
+            )
         if inventory_store.count() == 0:
             print(
                 "bourne: No inventory snapshots are recorded. Run 'bourne discover' first.",
@@ -353,43 +433,69 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (BackendError, PlanningError, OSError, ValueError) as exc:
                 print(f"bourne: {exc}", file=sys.stderr)
                 return 2
-            return _print_execution_result(result, arguments.json)
+            return _print_execution_result(result, arguments.json, execution_store)
 
-        command = list(arguments.command)
-        if command and command[0] == "--":
-            command.pop(0)
-        if not command:
-            parser.error(f"bourne {arguments.subcommand} requires a command or --plan")
-        parent = None
-        if arguments.derived_from is not None:
-            parent = _get(store, arguments.derived_from)
-            if parent is None:
+        if arguments.request is not None:
+            try:
+                request = load_execution_request(Path(arguments.request))
+            except ExecutionRequestError as exc:
+                print(f"bourne: {exc}", file=sys.stderr)
                 return 2
-        resources = ResourceRequirements(
-            cpus=arguments.cpus, gpus=arguments.gpus, nodes=arguments.nodes,
-            mpi_ranks=arguments.mpi_ranks, memory_bytes=arguments.memory,
-            walltime_seconds=arguments.walltime,
-        )
-        constraints = ExecutionConstraints(
-            backend=arguments.backend, target=arguments.target,
-            context=arguments.context,
-        )
-        resolution = service.create_plan(
-            command, snapshot, cwd=Path.cwd(), inputs=arguments.input,
-            outputs=arguments.output, resources=resources,
-            constraints=constraints,
-            parent_experiment_id=None if parent is None else parent.id,
-        )
+        else:
+            command = list(arguments.command)
+            if command and command[0] == "--":
+                command.pop(0)
+            if not command:
+                parser.error(f"bourne {arguments.subcommand} requires a command or --plan")
+            parent = None
+            if arguments.derived_from is not None:
+                parent = _get(store, arguments.derived_from)
+                if parent is None:
+                    return 2
+            resources = ResourceRequirements(
+                cpus=arguments.cpus, gpus=arguments.gpus, nodes=arguments.nodes,
+                mpi_ranks=arguments.mpi_ranks, memory_bytes=arguments.memory,
+                walltime_seconds=arguments.walltime,
+            )
+            constraints = ExecutionConstraints(
+                backend=arguments.backend or "auto", target=arguments.target,
+                context=arguments.context,
+            )
+            try:
+                request = execution_request_from_cli(
+                    command,
+                    cwd=Path.cwd(),
+                    inputs=arguments.input,
+                    outputs=arguments.output,
+                    resources=resources,
+                    execution=constraints,
+                    parent_experiment_id=None if parent is None else parent.id,
+                )
+            except ExecutionRequestError as exc:
+                print(f"bourne: {exc}", file=sys.stderr)
+                return 2
+        try:
+            resolution = service.plan_request(request, snapshot)
+            request = execution_store.get_request(request.id)
+        except (ExecutionRequestError, PlanningError, ValueError) as exc:
+            print(f"bourne: {exc}", file=sys.stderr)
+            return 2
         if arguments.subcommand == "plan":
+            structured = resolution.to_dict()
+            structured["request"] = request.to_dict()
             print(
-                json.dumps(resolution.to_dict(), ensure_ascii=False, sort_keys=True)
-                if arguments.json else format_resolution(resolution)
+                json.dumps(structured, ensure_ascii=False, sort_keys=True)
+                if arguments.json
+                else _format_request(request) + "\n\n" + format_resolution(resolution)
             )
             return 0 if resolution.selected is not None else 2
         if resolution.selected is None:
+            structured = resolution.to_dict()
+            structured["request"] = request.to_dict()
             print(
-                json.dumps(resolution.to_dict(), ensure_ascii=False, sort_keys=True)
-                if arguments.json else format_resolution(resolution),
+                json.dumps(structured, ensure_ascii=False, sort_keys=True)
+                if arguments.json
+                else _format_request(request) + "\n\n" + format_resolution(resolution),
                 file=sys.stderr,
             )
             return 2
@@ -398,7 +504,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (BackendError, PlanningError, OSError, ValueError) as exc:
             print(f"bourne: {exc}", file=sys.stderr)
             return 2
-        return _print_execution_result(result, arguments.json)
+        return _print_execution_result(result, arguments.json, execution_store)
 
     if arguments.subcommand == "execution":
         service = ExecutionService(execution_store, inventory_store)
@@ -437,13 +543,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (BackendError, TimeoutError) as exc:
             print(f"bourne: {exc}", file=sys.stderr)
             return 2
-        return _print_execution_result(result, False)
+        return _print_execution_result(result, False, execution_store)
 
     parser.error(f"unsupported command: {arguments.subcommand}")
     return 2
 
 
-def _print_execution_result(result: Submission | WorkerResult, structured: bool) -> int:
+def _print_execution_result(
+    result: Submission | WorkerResult,
+    structured: bool,
+    store: ExecutionStore | None = None,
+) -> int:
     if isinstance(result, Submission):
         value = {
             "execution_id": result.execution_id,
@@ -451,6 +561,9 @@ def _print_execution_result(result: Submission | WorkerResult, structured: bool)
             "job_id": result.job_id,
             "state": "submitted",
         }
+        if store is not None:
+            request = store.request_for_execution(result.execution_id)
+            value["request_id"] = None if request is None else request.id
         print(
             json.dumps(value, ensure_ascii=False, sort_keys=True)
             if structured
@@ -466,13 +579,76 @@ def _print_execution_result(result: Submission | WorkerResult, structured: bool)
         "experiment_id": None if result.experiment is None else result.experiment.id,
         "error": result.error,
     }
+    if store is not None:
+        request = store.request_for_execution(result.execution_id)
+        telemetry = store.telemetry(result.execution_id)
+        verification = store.verification(result.execution_id)
+        value.update(
+            {
+                "request_id": None if request is None else request.id,
+                "telemetry": None if telemetry is None else telemetry.to_dict(),
+                "verification": (
+                    None if verification is None else verification.to_dict()
+                ),
+            }
+        )
     print(
         json.dumps(value, ensure_ascii=False, sort_keys=True)
         if structured
         else (
             f"Execution: {result.execution_id}\nState: {result.state}\n"
-            f"Experiment: {value['experiment_id'] or 'unavailable'}"
+            f"Experiment: {value['experiment_id'] or 'unavailable'}\n"
+            f"Verification: "
+            f"{value.get('verification', {}).get('aggregate_state', 'unavailable') if value.get('verification') else 'unavailable'}\n"
+            f"Telemetry: "
+            f"{value.get('telemetry', {}).get('state', 'off or unavailable') if value.get('telemetry') else 'off or unavailable'}"
         ),
         file=sys.stderr if not structured and result.experiment is not None else sys.stdout,
     )
     return result.experiment.exit_code if result.experiment is not None else 2
+
+
+def _request_conflicts(arguments: argparse.Namespace) -> bool:
+    return bool(
+        arguments.command
+        or arguments.backend is not None
+        or arguments.target is not None
+        or arguments.context is not None
+        or arguments.cpus is not None
+        or arguments.gpus is not None
+        or arguments.nodes is not None
+        or arguments.mpi_ranks is not None
+        or arguments.memory is not None
+        or arguments.walltime is not None
+        or arguments.input
+        or arguments.output
+        or arguments.derived_from is not None
+    )
+
+
+def _format_request(
+    request: ExecutionRequest, *, persisted: bool = True
+) -> str:
+    resources = {
+        key: value for key, value in vars(request.resources).items()
+        if value is not None
+    }
+    checks = ", ".join(item.type for item in request.verification_checks)
+    return "\n".join(
+        (
+            "Request",
+            (
+                f"  ID: {request.id}"
+                if persisted
+                else "  ID: assigned when planned or executed"
+            ),
+            f"  Schema: {request.kind} v{request.request_schema_version}",
+            f"  Source: {request.source.kind}",
+            f"  Command: {json.dumps(request.argv, ensure_ascii=False)}",
+            f"  Working directory: {request.working_directory}",
+            f"  Resolved directory: {request.resolved_working_directory}",
+            f"  Resources: {json.dumps(resources, sort_keys=True) if resources else 'unspecified'}",
+            f"  Telemetry: {request.telemetry_mode}",
+            f"  Verification: {checks or 'not requested'}",
+        )
+    )

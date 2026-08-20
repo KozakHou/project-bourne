@@ -141,7 +141,30 @@ class WorkerTests(unittest.TestCase):
             }
             parsed = parse_worker_result(payload, "expected")
         self.assertIn("__import__", parsed.error)
+        self.assertEqual(parsed.protocol_version, 1)
+        self.assertIsNone(parsed.request_id)
+        self.assertIsNone(parsed.telemetry)
+        self.assertIsNone(parsed.verification)
         self.assertFalse(marker.exists())
+
+    def test_released_v04_result_does_not_invent_v05_outcomes(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "execution_id": "expected",
+            "state": "unknown",
+            "created_at": "2026-01-01T00:00:00Z",
+            "experiment": None,
+            "artifacts": [],
+            "lineage": [],
+            "allocation": None,
+            "preflight": {"status": "unavailable"},
+            "error": "released worker did not produce an experiment",
+        }
+        result = parse_worker_result(payload, "expected")
+        self.assertEqual(result.protocol_version, 1)
+        self.assertIsNone(result.request_id)
+        self.assertIsNone(result.telemetry)
+        self.assertIsNone(result.verification)
 
     def test_staged_plan_is_structurally_validated_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -8,9 +8,11 @@ import tempfile
 import zipapp
 from pathlib import Path
 
+from .execution_request import ExecutionRequest
 from .workload_models import ExecutionPlan, WorkloadSpec
 
-STAGED_PLAN_SCHEMA_VERSION = 1
+RELEASED_V04_STAGED_PLAN_SCHEMA_VERSION = 1
+STAGED_PLAN_SCHEMA_VERSION = 2
 
 
 def build_worker_zipapp(target: Path) -> Path:
@@ -39,15 +41,24 @@ def write_staged_plan(
     execution_id: str,
     plan: ExecutionPlan,
     workload: WorkloadSpec,
+    request: ExecutionRequest | None = None,
 ) -> Path:
     if plan.workload_id != workload.id:
         raise ValueError("workload does not match staged plan")
     value = {
-        "schema_version": STAGED_PLAN_SCHEMA_VERSION,
+        "schema_version": (
+            RELEASED_V04_STAGED_PLAN_SCHEMA_VERSION
+            if request is None
+            else STAGED_PLAN_SCHEMA_VERSION
+        ),
         "execution_id": execution_id,
         "plan": plan.to_dict(),
         "workload": workload.to_dict(),
     }
+    if request is not None:
+        if request.argv != workload.argv:
+            raise ValueError("execution request does not match staged workload")
+        value["request"] = request.to_dict()
     raw = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
