@@ -17,7 +17,7 @@ from .models import (
     SystemProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 _SCHEMA_V1 = (
     """
@@ -298,6 +298,116 @@ _MIGRATION_2_TO_3 = (
     """,
 )
 
+_MIGRATION_3_TO_4 = (
+    """
+    CREATE TABLE workload_specs (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        executable TEXT NOT NULL,
+        spec_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX workload_specs_created_at
+    ON workload_specs (created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE execution_plans (
+        id TEXT PRIMARY KEY,
+        workload_id TEXT NOT NULL
+            REFERENCES workload_specs(id) ON DELETE RESTRICT,
+        inventory_snapshot_id TEXT NOT NULL
+            REFERENCES inventory_snapshots(id) ON DELETE RESTRICT,
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs')),
+        access_target_id TEXT NOT NULL
+            REFERENCES discovered_targets(id) ON DELETE RESTRICT,
+        execution_target_id TEXT
+            REFERENCES discovered_targets(id) ON DELETE RESTRICT,
+        execution_context_id TEXT
+            REFERENCES discovered_execution_contexts(id) ON DELETE RESTRICT,
+        compatibility_state TEXT NOT NULL
+            CHECK (compatibility_state IN
+                ('compatible', 'partial', 'incompatible', 'unknown')),
+        created_at TEXT NOT NULL,
+        plan_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX execution_plans_created_at
+    ON execution_plans (created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE execution_attempts (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL
+            REFERENCES execution_plans(id) ON DELETE RESTRICT,
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs')),
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        submitting_identity TEXT,
+        staging_directory TEXT,
+        error TEXT
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX execution_attempts_updated_at
+    ON execution_attempts (updated_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE scheduler_jobs (
+        execution_id TEXT PRIMARY KEY
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        family TEXT NOT NULL CHECK (family IN ('slurm', 'pbs')),
+        job_id TEXT NOT NULL,
+        submitting_identity TEXT NOT NULL,
+        submitted_at TEXT NOT NULL,
+        state TEXT NOT NULL,
+        last_observed_at TEXT NOT NULL,
+        UNIQUE (family, job_id)
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE allocations (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        observed_at TEXT NOT NULL,
+        resources_json TEXT NOT NULL,
+        hosts_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX allocations_execution_observed
+    ON allocations (execution_id, observed_at, id)
+    """,
+    """
+    CREATE TABLE execution_events (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        occurred_at TEXT NOT NULL,
+        state TEXT NOT NULL,
+        details_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX execution_events_execution_time
+    ON execution_events (execution_id, occurred_at, id)
+    """,
+    """
+    CREATE TABLE execution_experiment_links (
+        execution_id TEXT PRIMARY KEY
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        experiment_id TEXT NOT NULL UNIQUE
+            REFERENCES experiments(id) ON DELETE RESTRICT,
+        relationship TEXT NOT NULL CHECK (relationship = 'actual_experiment')
+    ) WITHOUT ROWID
+    """,
+)
+
 
 class ExperimentNotFound(LookupError):
     pass
@@ -369,6 +479,11 @@ class ExperimentStore:
                     for statement in _MIGRATION_2_TO_3:
                         connection.execute(statement)
                     connection.execute("PRAGMA user_version = 3")
+                    version = 3
+                if version == 3:
+                    for statement in _MIGRATION_3_TO_4:
+                        connection.execute(statement)
+                    connection.execute("PRAGMA user_version = 4")
         except sqlite3.Error as exc:
             raise DatabaseMigrationError(f"could not migrate Bourne database: {exc}") from exc
 
@@ -392,75 +507,7 @@ class ExperimentStore:
 
         self.initialize()
         with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO experiments (
-                    id, schema_version, status, command, arguments_json,
-                    working_directory, started_at, ended_at, duration_seconds,
-                    exit_code, stdout, stderr, git_json, system_json,
-                    execution_context_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    experiment.id,
-                    experiment.schema_version,
-                    experiment.status,
-                    experiment.command,
-                    _json(experiment.arguments),
-                    experiment.working_directory,
-                    experiment.started_at,
-                    experiment.ended_at,
-                    experiment.duration_seconds,
-                    experiment.exit_code,
-                    experiment.stdout,
-                    experiment.stderr,
-                    _json(experiment.to_dict()["git"]),
-                    _json(experiment.to_dict()["system"]),
-                    _json(experiment.to_dict()["execution_context"]),
-                ),
-            )
-            connection.executemany(
-                """
-                INSERT INTO artifacts (
-                    id, experiment_id, role, original_path, resolved_path,
-                    existence_state, capture_status, sha256, size_bytes,
-                    modified_at, captured_at, capture_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        item.id,
-                        item.experiment_id,
-                        item.role,
-                        item.original_path,
-                        item.resolved_path,
-                        item.existence_state,
-                        item.capture_status,
-                        item.sha256,
-                        item.size_bytes,
-                        item.modified_at,
-                        item.captured_at,
-                        item.capture_error,
-                    )
-                    for item in artifacts
-                ],
-            )
-            connection.executemany(
-                """
-                INSERT INTO experiment_lineage (
-                    child_experiment_id, parent_experiment_id, relationship, created_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                [
-                    (
-                        item.child_experiment_id,
-                        item.parent_experiment_id,
-                        item.relationship,
-                        item.created_at,
-                    )
-                    for item in lineage
-                ],
-            )
+            _insert_experiment_record(connection, experiment, artifacts, lineage)
 
     def get(self, experiment_id: str) -> Experiment:
         self.initialize()
@@ -598,6 +645,71 @@ class ExperimentStore:
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _insert_experiment_record(
+    connection: sqlite3.Connection,
+    experiment: Experiment,
+    artifacts: Sequence[Artifact] = (),
+    lineage: Sequence[ExperimentLineage] = (),
+) -> None:
+    """Insert one complete experiment into an existing caller-owned transaction."""
+
+    if any(artifact.experiment_id != experiment.id for artifact in artifacts):
+        raise ValueError("artifact experiment IDs must match the saved experiment")
+    if any(item.child_experiment_id != experiment.id for item in lineage):
+        raise ValueError("lineage child IDs must match the saved experiment")
+    connection.execute(
+        """
+        INSERT INTO experiments (
+            id, schema_version, status, command, arguments_json,
+            working_directory, started_at, ended_at, duration_seconds,
+            exit_code, stdout, stderr, git_json, system_json,
+            execution_context_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            experiment.id, experiment.schema_version, experiment.status,
+            experiment.command, _json(experiment.arguments),
+            experiment.working_directory, experiment.started_at, experiment.ended_at,
+            experiment.duration_seconds, experiment.exit_code, experiment.stdout,
+            experiment.stderr, _json(experiment.to_dict()["git"]),
+            _json(experiment.to_dict()["system"]),
+            _json(experiment.to_dict()["execution_context"]),
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO artifacts (
+            id, experiment_id, role, original_path, resolved_path,
+            existence_state, capture_status, sha256, size_bytes,
+            modified_at, captured_at, capture_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item.id, item.experiment_id, item.role, item.original_path,
+                item.resolved_path, item.existence_state, item.capture_status,
+                item.sha256, item.size_bytes, item.modified_at, item.captured_at,
+                item.capture_error,
+            )
+            for item in artifacts
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO experiment_lineage (
+            child_experiment_id, parent_experiment_id, relationship, created_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        [
+            (
+                item.child_experiment_id, item.parent_experiment_id,
+                item.relationship, item.created_at,
+            )
+            for item in lineage
+        ],
+    )
 
 
 def _experiment_from_row(row: sqlite3.Row) -> Experiment:

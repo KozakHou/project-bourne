@@ -90,7 +90,7 @@ def discover_site(
         site_label=None,
         metadata={
             "bourne_version": __version__,
-            "schema_version": 3,
+            "schema_version": 4,
             "observation_scope": "current_identity_authorized_surface",
         },
         identity=state.identity,
