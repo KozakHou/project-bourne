@@ -9,9 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-The public release is Project Bourne v0.3.0. This repository is developing
-v0.4.0; `pip install bourneprov` installs the public v0.3.0 feature set until a
-later v0.4 release is published.
+This source tree is Project Bourne v0.4.0. Package releases are installed from
+PyPI with `pip install bourneprov`. Use `bourne --version` to confirm which
+release is active, or install this repository checkout to test its exact state.
 
 ~~~bash
 python -m pip install bourneprov
@@ -33,10 +33,9 @@ bourne run mpirun -np 64 ./solver
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
 
-## Workload planning and execution (v0.4 development)
+## Workload planning and execution (v0.4.0)
 
-The v0.4 source tree adds a durable planning layer over v0.3 inventories. To
-try it, install this repository checkout with `python -m pip install .`, then:
+Project Bourne v0.4.0 adds a durable planning layer over v0.3 inventories:
 
 ~~~bash
 bourne discover
@@ -66,6 +65,19 @@ bourne plan \
   -- ./solver case.yaml
 ~~~
 
+Execute a selected Slurm plan and then inspect or wait for the resulting
+execution attempt:
+
+~~~bash
+bourne execute --plan @1
+bourne execution show @1
+bourne execution wait @1
+~~~
+
+While a recorded job is still active, `bourne execution cancel @1` requests
+cancellation of that Bourne-managed job. The same planning and lifecycle model
+supports `--backend pbs`.
+
 Direct execution reuses Bourne's existing live-output, process-group, artifact,
 lineage, and experiment-provenance machinery. Slurm and PBS plans use a
 self-contained Bourne worker staged with the plan. The worker performs
@@ -85,9 +97,7 @@ the exact model, safety boundary, and current limitations.
 ## Compute-site discovery (v0.3.0)
 
 Bourne can take an immutable, local snapshot of the execution surface visible
-to your current identity. Before v0.3.0 is published to PyPI, install this
-repository checkout (`python -m pip install .`) to use the release-candidate
-command set:
+to your current identity:
 
 ~~~bash
 bourne discover
@@ -246,7 +256,7 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1, v0.2.0, or v0.3.0 database with the v0.4 source performs
+Opening a v0.1.1, v0.2.0, or v0.3.0 database with v0.4.0 performs
 deterministic transactional migrations through schema 4. Existing completed,
 failed, and interrupted
 experiments, artifacts, lineage, and execution-context observations remain
@@ -254,10 +264,9 @@ readable. Unknown or newer schema versions fail explicitly; Bourne never
 resets an existing database. Each new discovery creates a separate immutable
 snapshot.
 
-## Development validation
+## Release validation
 
-The repository version is 0.4.0.dev0. The runtime has zero third-party
-dependencies. v0.4 is not yet the PyPI release.
+The repository version is 0.4.0. The runtime has zero third-party dependencies.
 
 Run the source-tree tests with:
 

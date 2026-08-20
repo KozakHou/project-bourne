@@ -1,9 +1,8 @@
 # Workload Planning and Scheduler Execution
 
-Project Bourne v0.4 develops a framework-independent path from an observed
+Project Bourne v0.4.0 provides a framework-independent path from an observed
 compute-site inventory to an actual, provenance-bearing scientific experiment.
-This document describes the source-tree implementation; v0.4 is not yet a PyPI
-release.
+This document describes the v0.4.0 implementation.
 
 ## Durable model
 
