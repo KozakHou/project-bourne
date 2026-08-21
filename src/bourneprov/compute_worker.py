@@ -8,7 +8,7 @@ import platform
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .artifacts import capture_artifacts
 from .collectors.system import collect_system
@@ -60,6 +60,8 @@ def execute_plan(
     execution_id: str,
     *,
     request: ExecutionRequest | None = None,
+    stdout_stream: TextIO | None = None,
+    stderr_stream: TextIO | None = None,
 ) -> WorkerResult:
     allocation = _observe_allocation(execution_id, direct=plan.backend == "direct")
     problems, preflight = _preflight(plan, allocation)
@@ -76,7 +78,10 @@ def execute_plan(
     experiment_id = new_ulid()
     inputs = capture_artifacts(experiment_id, "input", list(plan.inputs), cwd)
     experiment = run_experiment(
-        plan.argv, cwd=cwd, stdout_stream=sys.stdout, stderr_stream=sys.stderr,
+        plan.argv,
+        cwd=cwd,
+        stdout_stream=sys.stdout if stdout_stream is None else stdout_stream,
+        stderr_stream=sys.stderr if stderr_stream is None else stderr_stream,
         experiment_id=experiment_id,
     )
     outputs = capture_artifacts(experiment_id, "output", list(plan.outputs), cwd)

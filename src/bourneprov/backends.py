@@ -8,7 +8,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TextIO
 
 from .bounded_subprocess import BoundedCommandResult, run_bounded_command
 from .compute_worker import execute_plan
@@ -90,8 +90,16 @@ class ExecutionBackend(Protocol):
 class DirectBackend:
     name = "direct"
 
-    def __init__(self, store: ExecutionStore):
+    def __init__(
+        self,
+        store: ExecutionStore,
+        *,
+        stdout_stream: TextIO | None = None,
+        stderr_stream: TextIO | None = None,
+    ):
         self.store = store
+        self.stdout_stream = stdout_stream
+        self.stderr_stream = stderr_stream
 
     def execute(
         self,
@@ -106,7 +114,12 @@ class DirectBackend:
         )
         request = self.store.request_for_workload(workload.id)
         result = execute_plan(
-            plan, workload, execution.id, request=request
+            plan,
+            workload,
+            execution.id,
+            request=request,
+            stdout_stream=self.stdout_stream,
+            stderr_stream=self.stderr_stream,
         )
         _import_result(self.store, result)
         return result

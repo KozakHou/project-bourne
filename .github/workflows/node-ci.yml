@@ -1,0 +1,43 @@
+name: Node CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["22", "24"]
+
+    defaults:
+      run:
+        working-directory: packages/mcp
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: packages/mcp/package-lock.json
+
+      - name: Install launcher development dependencies
+        run: npm ci
+
+      - name: Run launcher tests
+        run: npm test
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run

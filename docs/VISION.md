@@ -54,10 +54,13 @@ Project Bourne exists to answer that question.
 
 The v0.5 architecture adds a versioned execution-request boundary, truthful
 summary telemetry, and deterministic artifact verification over the generic
-v0.4 workload and execution-plan layer. User intent, workload understanding,
-planning, execution attempts, scheduler facts, actual experiments, telemetry,
-and verification remain distinct; see
-[Execution requests, telemetry, and verification](EXECUTION_REQUESTS.md).
+v0.4 workload and execution-plan layer. The v0.6 architecture adds an optional
+MCP adapter, transparent npm launcher, and portable agent guidance while
+keeping deterministic semantics in Bourne Core. User intent, workload
+understanding, planning, execution attempts, scheduler facts, actual
+experiments, telemetry, verification, and general scientific validity remain
+distinct; see [Execution requests, telemetry, and verification](EXECUTION_REQUESTS.md)
+and [MCP integration](MCP.md).
 
 ---
 
