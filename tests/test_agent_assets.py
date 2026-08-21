@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import tomllib
 import unittest
+from importlib.metadata import requires, version
 from pathlib import Path
 
 
@@ -11,12 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class AgentAssetTests(unittest.TestCase):
     def test_python_core_stays_dependency_free_and_mcp_is_optional(self) -> None:
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-            "project"
-        ]
-        self.assertEqual(project["version"], "0.6.0.dev0")
-        self.assertEqual(project["dependencies"], [])
-        self.assertEqual(project["optional-dependencies"]["mcp"], ["mcp>=2.0.0,<3"])
+        declared = requires("bourneprov") or []
+        self.assertEqual(version("bourneprov"), "0.6.0.dev0")
+        self.assertEqual(len(declared), 1)
+        self.assertTrue(declared[0].startswith("mcp<3,>=2.0.0;"))
+        self.assertIn('extra == "mcp"', declared[0])
 
     def test_npm_launcher_has_no_runtime_dependencies_and_exact_version_coupling(self) -> None:
         package = json.loads(
