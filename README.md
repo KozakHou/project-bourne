@@ -90,6 +90,11 @@ scientific working directory. Bourne preserves both the lexical and resolved
 working-directory values and does not expand `$HOME`, evaluate shell syntax,
 import project code, or execute anything while parsing or planning.
 
+Parent references follow the same intent-preserving rule. A request may use
+`latest`, `@N`, a unique prefix, or a full ULID. Bourne retains that requested
+value while separately recording the canonical parent ULID used by the compiled
+workload.
+
 Summary telemetry is enabled by default and uses already captured facts: wall
 time, UTF-8 stdout/stderr byte counts, known artifact byte totals, requested
 resources, observed allocation, and scheduler queue timing when timestamps

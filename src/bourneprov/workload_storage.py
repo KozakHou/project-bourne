@@ -71,13 +71,23 @@ class ExecutionStore:
         """Persist immutable user intent, its compiled workload, and link atomically."""
 
         if (
+            request.requested_parent_experiment is not None
+            and request.resolved_parent_experiment_id is None
+        ):
+            raise ValueError(
+                "linked request parent reference must be resolved"
+            )
+        if (
             workload.argv != request.argv
             or workload.working_directory != request.resolved_working_directory
             or workload.inputs != list(request.artifacts.inputs)
             or workload.outputs != list(request.artifacts.outputs)
             or workload.resources != request.resources
             or workload.constraints != request.execution
-            or workload.parent_experiment_id != request.parent_experiment_id
+            or (
+                workload.parent_experiment_id
+                != request.resolved_parent_experiment_id
+            )
         ):
             raise ValueError("workload does not match its execution request")
         with self._connection() as connection:

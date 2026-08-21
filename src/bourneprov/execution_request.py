@@ -131,7 +131,8 @@ class ExecutionRequest:
     artifacts: RequestArtifacts
     resources: ResourceRequirements
     execution: ExecutionConstraints
-    parent_experiment_id: str | None
+    requested_parent_experiment: str | None
+    resolved_parent_experiment_id: str | None
     telemetry_mode: str
     verification_checks: tuple[VerificationCheckSpec, ...]
     source: RequestSource
@@ -183,10 +184,20 @@ class ExecutionRequest:
                 raise ExecutionRequestError(
                     f"verification path {check.path!r} is not a declared output"
                 )
-        if self.parent_experiment_id is not None:
+        if self.requested_parent_experiment is not None:
             _bounded_string(
-                self.parent_experiment_id,
-                "parent experiment",
+                self.requested_parent_experiment,
+                "requested parent experiment",
+                allow_empty=False,
+            )
+        if self.resolved_parent_experiment_id is not None:
+            if self.requested_parent_experiment is None:
+                raise ExecutionRequestError(
+                    "a resolved parent experiment requires a requested reference"
+                )
+            _bounded_string(
+                self.resolved_parent_experiment_id,
+                "resolved parent experiment ID",
                 allow_empty=False,
             )
 
@@ -206,7 +217,9 @@ class ExecutionRequest:
             },
             "resources": asdict(self.resources),
             "execution": asdict(self.execution),
-            "provenance": {"parent_experiment": self.parent_experiment_id},
+            "provenance": {
+                "parent_experiment": self.requested_parent_experiment
+            },
             "telemetry": {"mode": self.telemetry_mode},
             "verification": {
                 "checks": [item.to_dict() for item in self.verification_checks]
@@ -247,9 +260,9 @@ class ExecutionRequest:
             value["execution"] = {
                 key: item for key, item in execution.items() if item is not None
             }
-        if self.parent_experiment_id is not None:
+        if self.requested_parent_experiment is not None:
             value["provenance"] = {
-                "parent_experiment": self.parent_experiment_id
+                "parent_experiment": self.requested_parent_experiment
             }
         if self.telemetry_mode != "summary":
             value["telemetry"] = {"mode": self.telemetry_mode}
@@ -275,7 +288,8 @@ class ExecutionRequest:
             },
             "resources": asdict(self.resources),
             "execution": asdict(self.execution),
-            "parent_experiment_id": self.parent_experiment_id,
+            "requested_parent_experiment": self.requested_parent_experiment,
+            "resolved_parent_experiment_id": self.resolved_parent_experiment_id,
             "telemetry_mode": self.telemetry_mode,
             "verification_checks": [
                 item.to_dict() for item in self.verification_checks
@@ -290,7 +304,8 @@ class ExecutionRequest:
             {
                 "id", "created_at", "kind", "request_schema_version", "command",
                 "base_directory", "working_directory", "resolved_working_directory",
-                "artifacts", "resources", "execution", "parent_experiment_id",
+                "artifacts", "resources", "execution",
+                "requested_parent_experiment", "resolved_parent_experiment_id",
                 "telemetry_mode", "verification_checks", "source",
             },
             "persisted execution request",
@@ -301,7 +316,8 @@ class ExecutionRequest:
         resources = value.get("resources")
         execution = value.get("execution")
         checks = value.get("verification_checks")
-        parent = value.get("parent_experiment_id")
+        requested_parent = value.get("requested_parent_experiment")
+        resolved_parent = value.get("resolved_parent_experiment_id")
         string_fields = (
             "id", "created_at", "kind", "base_directory", "working_directory",
             "resolved_working_directory", "telemetry_mode",
@@ -318,7 +334,14 @@ class ExecutionRequest:
             or not isinstance(execution, dict)
             or not isinstance(checks, list)
             or not isinstance(source, dict)
-            or (parent is not None and not isinstance(parent, str))
+            or (
+                requested_parent is not None
+                and not isinstance(requested_parent, str)
+            )
+            or (
+                resolved_parent is not None
+                and not isinstance(resolved_parent, str)
+            )
         ):
             raise ExecutionRequestError("persisted request structure is invalid")
         return cls(
@@ -335,7 +358,8 @@ class ExecutionRequest:
             ),
             resources=ResourceRequirements.from_dict(resources),
             execution=ExecutionConstraints.from_dict(execution),
-            parent_experiment_id=parent,
+            requested_parent_experiment=requested_parent,
+            resolved_parent_experiment_id=resolved_parent,
             telemetry_mode=value["telemetry_mode"],
             verification_checks=tuple(
                 VerificationCheckSpec(**item)
@@ -344,8 +368,14 @@ class ExecutionRequest:
             source=RequestSource.from_dict(source),
         )
 
-    def with_parent_experiment(self, canonical_id: str) -> "ExecutionRequest":
-        return replace(self, parent_experiment_id=canonical_id)
+    def with_resolved_parent_experiment(
+        self, canonical_id: str
+    ) -> "ExecutionRequest":
+        if self.requested_parent_experiment is None:
+            raise ExecutionRequestError(
+                "cannot resolve a parent experiment that was not requested"
+            )
+        return replace(self, resolved_parent_experiment_id=canonical_id)
 
 
 def parse_execution_request(
@@ -489,7 +519,8 @@ def parse_execution_request(
         artifacts=RequestArtifacts(tuple(inputs), tuple(outputs)),
         resources=resources,
         execution=execution,
-        parent_experiment_id=parent,
+        requested_parent_experiment=parent,
+        resolved_parent_experiment_id=None,
         telemetry_mode=telemetry_mode,
         verification_checks=checks,
         source=source,

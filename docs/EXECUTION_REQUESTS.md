@@ -130,6 +130,20 @@ interpret `;`, `|`, or `&`, strip quotes, invoke a shell, evaluate templates,
 import project modules, or run a program. Unicode and these characters remain
 literal JSON strings and exact argv values.
 
+## Parent-reference intent
+
+`provenance.parent_experiment` accepts the same full ULID, unique prefix,
+`latest`, or `@N` references as the CLI. Bourne preserves that lexical value as
+the requested parent reference. Planning resolves it once against the configured
+database and records the resulting canonical experiment ULID separately; the
+compiled `WorkloadSpec` receives only that canonical ID.
+
+For example, a request containing `"parent_experiment": "latest"` remains
+inspectable as `latest` after persistence while also reporting which full ULID
+`latest` meant at planning time. Resolution does not change the request identity
+or overwrite the original intent. An invalid or ambiguous reference prevents
+request, workload, and plan persistence.
+
 ## Validation and bounds
 
 Version 1 rejects unknown fields at every semantic object boundary so a typo

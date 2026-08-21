@@ -4,9 +4,11 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,11 +25,17 @@ from bourneprov.execution_request import (
     load_execution_request,
     parse_execution_request,
 )
-from bourneprov.execution_service import request_to_workload
+from bourneprov.execution_service import (
+    ExecutionService,
+    PlanningError,
+    request_to_workload,
+)
+from bourneprov.ids import new_ulid
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.storage import ExperimentStore
 from bourneprov.workload_models import ExecutionConstraints, ResourceRequirements
 from bourneprov.workload_storage import ExecutionStore
+from tests.fixtures import experiment
 from tests.v04_fixtures import inventory_snapshot
 
 
@@ -82,7 +90,8 @@ class ExecutionRequestValidationTests(unittest.TestCase):
         self.assertEqual(request.resources.memory_bytes, 4 * 1024**3)
         self.assertEqual(request.resources.walltime_seconds, 7200)
         self.assertEqual(request.verification_checks[-1].sha256, "a" * 64)
-        self.assertEqual(request.parent_experiment_id, "latest")
+        self.assertEqual(request.requested_parent_experiment, "latest")
+        self.assertIsNone(request.resolved_parent_experiment_id)
 
     def test_unknown_top_level_and_nested_fields_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +283,180 @@ class ExecutionRequestValidationTests(unittest.TestCase):
         self.assertEqual(request.execution.backend, "auto")
         self.assertEqual(request.artifacts.outputs, ("result.h5",))
         self.assertEqual(request.verification_checks[0].type, "output_exists")
+
+
+class ParentReferenceIntentTests(unittest.TestCase):
+    def _parents(self, database: Path) -> tuple[str, str]:
+        older_id = new_ulid(1_700_000_000_000)
+        latest_id = new_ulid(1_700_000_001_000)
+        store = ExperimentStore(database)
+        store.save(
+            experiment(
+                id=older_id,
+                started_at="2026-01-01T00:00:00.000000Z",
+                ended_at="2026-01-01T00:00:01.000000Z",
+            )
+        )
+        store.save(
+            experiment(
+                id=latest_id,
+                started_at="2026-01-02T00:00:00.000000Z",
+                ended_at="2026-01-02T00:00:01.000000Z",
+            )
+        )
+        return older_id, latest_id
+
+    def _plan_file_reference(
+        self,
+        root: Path,
+        reference: str,
+    ):
+        database = root / "bourne.sqlite3"
+        request_path = root / "bourne.json"
+        request_path.write_text(
+            json.dumps(
+                minimal(
+                    execution={"backend": "direct"},
+                    provenance={"parent_experiment": reference},
+                )
+            ),
+            encoding="utf-8",
+        )
+        snapshot = inventory_snapshot(root, executable="solver")
+        InventoryStore(database).save(snapshot)
+        parsed = load_execution_request(request_path)
+        self.assertEqual(parsed.requested_parent_experiment, reference)
+        self.assertIsNone(parsed.resolved_parent_experiment_id)
+        service = ExecutionService(
+            ExecutionStore(database), InventoryStore(database)
+        )
+        resolution = service.plan_request(parsed, snapshot)
+        self.assertIsNotNone(resolution.selected)
+        store = ExecutionStore(database)
+        persisted = store.get_request(parsed.id)
+        workload = store.get_workload(resolution.selected.workload_id)  # type: ignore[union-attr]
+        self.assertEqual(persisted.id, parsed.id)
+        self.assertIsNone(parsed.resolved_parent_experiment_id)
+        self.assertEqual(store.count_requests(), 1)
+        return persisted, workload
+
+    def test_file_latest_preserves_request_and_compiles_canonical_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _older_id, latest_id = self._parents(root / "bourne.sqlite3")
+            persisted, workload = self._plan_file_reference(root, "latest")
+        self.assertEqual(persisted.requested_parent_experiment, "latest")
+        self.assertEqual(persisted.resolved_parent_experiment_id, latest_id)
+        self.assertEqual(workload.parent_experiment_id, latest_id)
+        self.assertEqual(
+            persisted.to_document()["provenance"]["parent_experiment"],
+            "latest",
+        )
+
+    def test_unique_prefix_is_retained_while_workload_uses_canonical_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _older_id, latest_id = self._parents(root / "bourne.sqlite3")
+            prefix = latest_id[:12]
+            persisted, workload = self._plan_file_reference(root, prefix)
+        self.assertEqual(persisted.requested_parent_experiment, prefix)
+        self.assertEqual(persisted.resolved_parent_experiment_id, latest_id)
+        self.assertEqual(workload.parent_experiment_id, latest_id)
+
+    def test_full_canonical_parent_is_preserved_and_resolved_identically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older_id, _latest_id = self._parents(root / "bourne.sqlite3")
+            persisted, workload = self._plan_file_reference(root, older_id)
+        self.assertEqual(persisted.requested_parent_experiment, older_id)
+        self.assertEqual(persisted.resolved_parent_experiment_id, older_id)
+        self.assertEqual(workload.parent_experiment_id, older_id)
+
+    def test_relative_parent_is_retained_while_workload_uses_canonical_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            older_id, _latest_id = self._parents(root / "bourne.sqlite3")
+            persisted, workload = self._plan_file_reference(root, "@2")
+        self.assertEqual(persisted.requested_parent_experiment, "@2")
+        self.assertEqual(persisted.resolved_parent_experiment_id, older_id)
+        self.assertEqual(workload.parent_experiment_id, older_id)
+
+    def test_invalid_and_ambiguous_parent_create_no_partial_planning_state(self) -> None:
+        for kind in ("missing", "ambiguous"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                database = root / "bourne.sqlite3"
+                snapshot = inventory_snapshot(root)
+                InventoryStore(database).save(snapshot)
+                if kind == "missing":
+                    reference = "no-such-parent"
+                else:
+                    first = new_ulid(1_700_000_002_000)
+                    second = new_ulid(1_700_000_002_000)
+                    ExperimentStore(database).save(experiment(id=first))
+                    ExperimentStore(database).save(
+                        experiment(
+                            id=second,
+                            started_at="2026-01-02T00:00:00.000000Z",
+                            ended_at="2026-01-02T00:00:01.000000Z",
+                        )
+                    )
+                    reference = first[:10]
+                request = parse_execution_request(
+                    minimal(
+                        execution={"backend": "direct"},
+                        provenance={"parent_experiment": reference},
+                    ),
+                    base_directory=root,
+                    source=RequestSource("file"),
+                )
+                store = ExecutionStore(database)
+                service = ExecutionService(store, InventoryStore(database))
+                with self.assertRaises(PlanningError):
+                    service.plan_request(request, snapshot)
+                with closing(sqlite3.connect(database)) as connection:
+                    counts = {
+                        table: connection.execute(
+                            f"SELECT count(*) FROM {table}"
+                        ).fetchone()[0]
+                        for table in (
+                            "execution_requests",
+                            "execution_request_workload_links",
+                            "workload_specs",
+                            "execution_plans",
+                        )
+                    }
+                self.assertEqual(set(counts.values()), {0})
+
+    def test_cli_derived_from_uses_the_same_intent_preserving_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            _older_id, latest_id = self._parents(database)
+            InventoryStore(database).save(inventory_snapshot(root))
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {"BOURNE_DB": str(database)}),
+                patch("bourneprov.cli.Path.cwd", return_value=root),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "plan", "--backend", "direct",
+                            "--derived-from", "latest", "--json", "--",
+                            sys.executable, "-c", "pass",
+                        ]
+                    ),
+                    0,
+                )
+            payload = json.loads(output.getvalue())
+            store = ExecutionStore(database)
+            persisted = store.get_request(payload["request"]["id"])
+            workload = store.get_workload(payload["selected"]["workload_id"])
+        self.assertEqual(persisted.requested_parent_experiment, "latest")
+        self.assertEqual(persisted.resolved_parent_experiment_id, latest_id)
+        self.assertEqual(workload.parent_experiment_id, latest_id)
 
 
 class RequestCliTests(unittest.TestCase):

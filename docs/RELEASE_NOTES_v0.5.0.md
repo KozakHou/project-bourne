@@ -15,6 +15,8 @@ Highlights:
 - `bourne plan --request bourne.json` and
   `bourne execute --request bourne.json`;
 - one common request pipeline for CLI flags, files, and Python callers;
+- separate preservation of a requested parent reference and the canonical
+  parent experiment resolved for the compiled workload;
 - low-overhead summary telemetry based only on existing Bourne evidence;
 - deterministic `output_exists`, `output_min_bytes`, and `output_sha256`
   verification from captured Artifact records;

@@ -56,7 +56,11 @@ def write_staged_plan(
         "workload": workload.to_dict(),
     }
     if request is not None:
-        if request.argv != workload.argv:
+        if (
+            request.argv != workload.argv
+            or request.resolved_parent_experiment_id
+            != workload.parent_experiment_id
+        ):
             raise ValueError("execution request does not match staged workload")
         value["request"] = request.to_dict()
     raw = json.dumps(

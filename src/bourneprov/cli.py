@@ -447,11 +447,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command.pop(0)
             if not command:
                 parser.error(f"bourne {arguments.subcommand} requires a command or --plan")
-            parent = None
-            if arguments.derived_from is not None:
-                parent = _get(store, arguments.derived_from)
-                if parent is None:
-                    return 2
             resources = ResourceRequirements(
                 cpus=arguments.cpus, gpus=arguments.gpus, nodes=arguments.nodes,
                 mpi_ranks=arguments.mpi_ranks, memory_bytes=arguments.memory,
@@ -469,7 +464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     outputs=arguments.output,
                     resources=resources,
                     execution=constraints,
-                    parent_experiment_id=None if parent is None else parent.id,
+                    parent_experiment_id=arguments.derived_from,
                 )
             except ExecutionRequestError as exc:
                 print(f"bourne: {exc}", file=sys.stderr)
@@ -647,6 +642,14 @@ def _format_request(
             f"  Command: {json.dumps(request.argv, ensure_ascii=False)}",
             f"  Working directory: {request.working_directory}",
             f"  Resolved directory: {request.resolved_working_directory}",
+            (
+                "  Requested parent reference: "
+                f"{request.requested_parent_experiment or 'none'}"
+            ),
+            (
+                "  Resolved parent experiment: "
+                f"{request.resolved_parent_experiment_id or 'unresolved'}"
+            ),
             f"  Resources: {json.dumps(resources, sort_keys=True) if resources else 'unspecified'}",
             f"  Telemetry: {request.telemetry_mode}",
             f"  Verification: {checks or 'not requested'}",

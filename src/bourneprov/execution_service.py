@@ -52,6 +52,13 @@ class RequestExecutionResult:
 def request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
     """Compile normalized intent into the existing framework-neutral workload."""
 
+    if (
+        request.requested_parent_experiment is not None
+        and request.resolved_parent_experiment_id is None
+    ):
+        raise PlanningError(
+            "parent experiment reference must be resolved before workload compilation"
+        )
     return inspect_workload(
         request.argv,
         cwd=Path(request.resolved_working_directory),
@@ -59,7 +66,7 @@ def request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
         outputs=request.artifacts.outputs,
         resources=request.resources,
         constraints=request.execution,
-        parent_experiment_id=request.parent_experiment_id,
+        parent_experiment_id=request.resolved_parent_experiment_id,
     )
 
 
@@ -230,14 +237,13 @@ class ExecutionService:
         return backend
 
     def _resolve_parent(self, request: ExecutionRequest) -> ExecutionRequest:
-        if request.parent_experiment_id is None:
+        if request.requested_parent_experiment is None:
             return request
         try:
             parent = resolve_experiment(
-                ExperimentStore(self.store.path), request.parent_experiment_id
+                ExperimentStore(self.store.path),
+                request.requested_parent_experiment,
             )
         except ExperimentReferenceError as exc:
             raise PlanningError(str(exc)) from exc
-        if parent.id == request.parent_experiment_id:
-            return request
-        return request.with_parent_experiment(parent.id)
+        return request.with_resolved_parent_experiment(parent.id)

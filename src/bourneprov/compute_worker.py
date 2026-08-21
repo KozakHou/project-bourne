@@ -159,7 +159,10 @@ def _load_plan(
         or list(request.artifacts.outputs) != workload.outputs
         or request.resources != workload.resources
         or request.execution != workload.constraints
-        or request.parent_experiment_id != workload.parent_experiment_id
+        or (
+            request.resolved_parent_experiment_id
+            != workload.parent_experiment_id
+        )
     ):
         raise ValueError("staged request does not match its workload")
     return plan, workload, request
