@@ -342,6 +342,13 @@ records. Unknown or newer schema versions fail explicitly; Bourne never resets
 an existing database. Each new discovery creates a separate immutable
 snapshot.
 
+## License
+
+Project Bourne v0.5.0 and later are distributed under the
+[Apache License 2.0](LICENSE). Releases through v0.4.0 remain under the MIT
+License terms under which they were released. See the
+[licensing history](docs/LICENSING.md) for details.
+
 ## Release validation
 
 The repository version is `0.5.0`. The runtime has zero third-party
