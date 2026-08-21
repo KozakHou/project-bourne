@@ -26,6 +26,15 @@ these values as a pending publisher at:
 For later releases, manage the publisher under the project's Publishing
 settings on PyPI.
 
+## License validation
+
+Before publishing, confirm that:
+
+- `pyproject.toml` contains the intended SPDX license expression;
+- the root `LICENSE` and `NOTICE` files are present;
+- wheel metadata contains the expected `License-Expression` and `License-File`;
+- both the wheel and source distribution contain the intended license files.
+
 ## Publishing a release
 
 1. Update and validate the version in `pyproject.toml`.

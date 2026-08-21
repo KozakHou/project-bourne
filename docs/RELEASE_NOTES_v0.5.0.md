@@ -126,6 +126,16 @@ request-less v0.4 work does not acquire fictional v0.5 history. The external
 request schema remains version 1, while new staged plans and results use
 protocol version 2.
 
+## License
+
+Beginning with v0.5.0, Project Bourne is distributed under the Apache License
+2.0. Earlier releases through v0.4.0 remain under the MIT License terms under
+which they were released.
+
+This licensing transition does not change runtime behavior, SQLite schema 5,
+the ExecutionRequest version-1 contract, worker protocol 2, compatibility with
+released worker protocol 1, or the zero-runtime-dependency policy.
+
 ## Limitations
 
 v0.5.0 does not provide high-frequency CPU/GPU/memory/I/O sampling, profiling,
