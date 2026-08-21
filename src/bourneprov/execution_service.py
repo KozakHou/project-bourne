@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Sequence
 
 from .backends import (
@@ -19,6 +20,12 @@ from .inventory_storage import InventoryStore
 from .ids import new_ulid
 from .identity import current_process_identity
 from .resolver import resolve_execution
+from .execution_request import (
+    ExecutionRequest,
+    execution_request_from_cli,
+)
+from .references import ExperimentReferenceError, resolve_experiment
+from .storage import ExperimentStore
 from .worker_result import WorkerResult
 from .workload import inspect_workload, utc_now
 from .workload_models import (
@@ -26,12 +33,41 @@ from .workload_models import (
     ExecutionConstraints,
     ResolutionResult,
     ResourceRequirements,
+    WorkloadSpec,
 )
 from .workload_storage import ExecutionStore
 
 
 class PlanningError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RequestExecutionResult:
+    request: ExecutionRequest
+    resolution: ResolutionResult
+    result: Submission | WorkerResult | None
+
+
+def request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
+    """Compile normalized intent into the existing framework-neutral workload."""
+
+    if (
+        request.requested_parent_experiment is not None
+        and request.resolved_parent_experiment_id is None
+    ):
+        raise PlanningError(
+            "parent experiment reference must be resolved before workload compilation"
+        )
+    return inspect_workload(
+        request.argv,
+        cwd=Path(request.resolved_working_directory),
+        inputs=request.artifacts.inputs,
+        outputs=request.artifacts.outputs,
+        resources=request.resources,
+        constraints=request.execution,
+        parent_experiment_id=request.resolved_parent_experiment_id,
+    )
 
 
 class ExecutionService:
@@ -62,18 +98,53 @@ class ExecutionService:
         constraints: ExecutionConstraints | None = None,
         parent_experiment_id: str | None = None,
     ) -> ResolutionResult:
-        workload = inspect_workload(
-            argv, cwd=cwd, inputs=inputs, outputs=outputs,
-            resources=resources, constraints=constraints,
+        request = execution_request_from_cli(
+            argv,
+            cwd=cwd or Path.cwd(),
+            inputs=inputs,
+            outputs=outputs,
+            resources=resources,
+            execution=constraints,
             parent_experiment_id=parent_experiment_id,
+            source_kind="sdk",
         )
-        self.store.save_workload(workload)
+        return self.plan_request(request, inventory)
+
+    def plan_request(
+        self,
+        request: ExecutionRequest,
+        inventory: InventorySnapshot,
+    ) -> ResolutionResult:
+        normalized = self._resolve_parent(request)
+        workload = request_to_workload(normalized)
+        self.store.save_request_with_workload(normalized, workload)
         resolution = resolve_execution(workload, inventory)
         if resolution.selected is not None:
             self.store.save_plan(resolution.selected)
         return resolution
 
     create_plan = plan
+
+    def execute_request(
+        self,
+        request: ExecutionRequest,
+        inventory: InventorySnapshot,
+        *,
+        backend: ExecutionBackend | None = None,
+    ) -> RequestExecutionResult:
+        resolution = self.plan_request(request, inventory)
+        if resolution.selected is None:
+            return RequestExecutionResult(
+                self.store.get_request(request.id), resolution, None
+            )
+        result = self.execute_plan(
+            resolution.selected.id,
+            inventory,
+            backend=backend,
+        )
+        return RequestExecutionResult(
+            self.store.get_request(request.id), resolution, result
+        )
 
     def execute_plan(
         self,
@@ -164,3 +235,15 @@ class ExecutionService:
         if not isinstance(backend, SchedulerBackend):
             raise PlanningError("direct execution is synchronous")
         return backend
+
+    def _resolve_parent(self, request: ExecutionRequest) -> ExecutionRequest:
+        if request.requested_parent_experiment is None:
+            return request
+        try:
+            parent = resolve_experiment(
+                ExperimentStore(self.store.path),
+                request.requested_parent_experiment,
+            )
+        except ExperimentReferenceError as exc:
+            raise PlanningError(str(exc)) from exc
+        return request.with_resolved_parent_experiment(parent.id)

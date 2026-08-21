@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .execution_outcomes import ExecutionTelemetrySummary, VerificationRun
 from .models import (
     Artifact,
     ExecutionContext,
@@ -18,7 +19,8 @@ from .models import (
 )
 from .workload_models import AllocationObservation
 
-RESULT_SCHEMA_VERSION = 1
+RELEASED_V04_RESULT_SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 MAX_RESULT_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_RESULT_ARTIFACTS = 4096
 MAX_RESULT_LINEAGE = 16
@@ -39,12 +41,16 @@ class WorkerResult:
     allocation: AllocationObservation | None
     preflight: dict[str, Any]
     error: str | None = None
+    request_id: str | None = None
+    telemetry: ExecutionTelemetrySummary | None = None
+    verification: VerificationRun | None = None
+    protocol_version: int = RESULT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         from dataclasses import asdict
 
-        return {
-            "schema_version": RESULT_SCHEMA_VERSION,
+        value = {
+            "schema_version": self.protocol_version,
             "execution_id": self.execution_id,
             "state": self.state,
             "created_at": self.created_at,
@@ -55,6 +61,21 @@ class WorkerResult:
             "preflight": self.preflight,
             "error": self.error,
         }
+        if self.protocol_version >= 2:
+            value.update(
+                {
+                    "request_id": self.request_id,
+                    "telemetry": (
+                        None if self.telemetry is None else self.telemetry.to_dict()
+                    ),
+                    "verification": (
+                        None
+                        if self.verification is None
+                        else self.verification.to_dict()
+                    ),
+                }
+            )
+        return value
 
 
 def encode_worker_result(result: WorkerResult) -> bytes:
@@ -88,7 +109,11 @@ def load_worker_result(path: Path, execution_id: str) -> WorkerResult:
 def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
     if not isinstance(value, dict):
         raise WorkerResultError("worker result must be a JSON object")
-    if value.get("schema_version") != RESULT_SCHEMA_VERSION:
+    protocol_version = value.get("schema_version")
+    if protocol_version not in {
+        RELEASED_V04_RESULT_SCHEMA_VERSION,
+        RESULT_SCHEMA_VERSION,
+    }:
         raise WorkerResultError("unsupported worker result schema")
     if value.get("execution_id") != execution_id:
         raise WorkerResultError("worker result execution ID does not match")
@@ -132,10 +157,54 @@ def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
             raise WorkerResultError("worker state does not match experiment status")
     elif state not in {"preflight_failed", "collection_failed", "cancelled", "unknown"}:
         raise WorkerResultError("a terminal workload state requires an experiment")
+    request_id: str | None = None
+    telemetry: ExecutionTelemetrySummary | None = None
+    verification: VerificationRun | None = None
+    if protocol_version == RESULT_SCHEMA_VERSION:
+        raw_request_id = value.get("request_id")
+        if not isinstance(raw_request_id, str) or not raw_request_id:
+            raise WorkerResultError("worker result request ID is invalid")
+        request_id = raw_request_id
+        try:
+            raw_telemetry = value.get("telemetry")
+            telemetry = (
+                None
+                if raw_telemetry is None
+                else ExecutionTelemetrySummary.from_dict(
+                    _object(raw_telemetry, "telemetry")
+                )
+            )
+            raw_verification = value.get("verification")
+            verification = (
+                None
+                if raw_verification is None
+                else VerificationRun.from_dict(
+                    _object(raw_verification, "verification")
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkerResultError(f"worker outcome structure is invalid: {exc}") from exc
+        if experiment is None:
+            if telemetry is not None or verification is not None:
+                raise WorkerResultError("worker outcomes require an experiment")
+        else:
+            if verification is None:
+                raise WorkerResultError("version-2 worker result requires verification")
+            for outcome in (telemetry, verification):
+                if outcome is not None and (
+                    outcome.request_id != request_id
+                    or outcome.execution_id != execution_id
+                    or outcome.experiment_id != experiment.id
+                ):
+                    raise WorkerResultError("worker outcome relationships do not match")
     return WorkerResult(
         execution_id=execution_id, state=state, created_at=created_at,
         experiment=experiment, artifacts=artifacts, lineage=lineage,
         allocation=allocation, preflight=preflight, error=error,
+        request_id=request_id,
+        telemetry=telemetry,
+        verification=verification,
+        protocol_version=protocol_version,
     )
 
 

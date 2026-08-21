@@ -14,6 +14,8 @@ from .artifacts import capture_artifacts
 from .collectors.system import collect_system
 from .collectors.execution_context import resolve_executable
 from .ids import new_ulid
+from .execution_outcomes import build_telemetry_summary, evaluate_verification
+from .execution_request import ExecutionRequest
 from .lifecycle import run_experiment
 from .models import ExperimentLineage
 from .worker_result import WorkerResult, encode_worker_result
@@ -43,8 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     plan_path, result_path, execution_id = map(str, arguments)
     try:
-        plan, workload = _load_plan(Path(plan_path), execution_id)
-        result = execute_plan(plan, workload, execution_id)
+        plan, workload, request = _load_plan(Path(plan_path), execution_id)
+        result = execute_plan(plan, workload, execution_id, request=request)
         _write_immutable(Path(result_path), encode_worker_result(result))
     except Exception as exc:
         print(f"bourne worker failed: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -56,6 +58,8 @@ def execute_plan(
     plan: ExecutionPlan,
     workload: WorkloadSpec,
     execution_id: str,
+    *,
+    request: ExecutionRequest | None = None,
 ) -> WorkerResult:
     allocation = _observe_allocation(execution_id, direct=plan.backend == "direct")
     problems, preflight = _preflight(plan, allocation)
@@ -65,6 +69,8 @@ def execute_plan(
             experiment=None, artifacts=[], lineage=[], allocation=allocation,
             preflight={**preflight, "status": "failed", "problems": problems},
             error="; ".join(problems),
+            request_id=None if request is None else request.id,
+            protocol_version=1 if request is None else 2,
         )
     cwd = Path(plan.working_directory)
     experiment_id = new_ulid()
@@ -85,19 +91,39 @@ def execute_plan(
         if workload.parent_experiment_id is not None
         else []
     )
+    telemetry = (
+        None
+        if request is None
+        else build_telemetry_summary(
+            request, plan, execution_id, experiment, [*inputs, *outputs], allocation
+        )
+    )
+    verification = (
+        None
+        if request is None
+        else evaluate_verification(
+            request, execution_id, experiment, [*inputs, *outputs]
+        )
+    )
     return WorkerResult(
         execution_id=execution_id, state=experiment.status,
         created_at=experiment.ended_at, experiment=experiment,
         artifacts=[*inputs, *outputs], lineage=lineage, allocation=allocation,
         preflight={**preflight, "status": "passed", "problems": []},
+        request_id=None if request is None else request.id,
+        telemetry=telemetry,
+        verification=verification,
+        protocol_version=1 if request is None else 2,
     )
 
 
-def _load_plan(path: Path, execution_id: str) -> tuple[ExecutionPlan, WorkloadSpec]:
+def _load_plan(
+    path: Path, execution_id: str
+) -> tuple[ExecutionPlan, WorkloadSpec, ExecutionRequest | None]:
     if path.stat().st_size > MAX_PLAN_BYTES:
         raise ValueError("staged plan exceeds the size limit")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
         raise ValueError("unsupported staged plan")
     if value.get("execution_id") != execution_id:
         raise ValueError("staged plan execution ID does not match")
@@ -108,6 +134,13 @@ def _load_plan(path: Path, execution_id: str) -> tuple[ExecutionPlan, WorkloadSp
     _validate_staged_models(plan_value, workload_value)
     plan = ExecutionPlan.from_dict(plan_value)
     workload = WorkloadSpec.from_dict(workload_value)
+    request_value = value.get("request")
+    if value["schema_version"] == 2:
+        if not isinstance(request_value, dict):
+            raise ValueError("version-2 staged plan requires an execution request")
+        request = ExecutionRequest.from_dict(request_value)
+    else:
+        request = None
     if plan.workload_id != workload.id:
         raise ValueError("staged workload does not match plan")
     if (
@@ -119,7 +152,20 @@ def _load_plan(path: Path, execution_id: str) -> tuple[ExecutionPlan, WorkloadSp
         or plan.requested_resources != workload.resources
     ):
         raise ValueError("staged plan content does not match its workload")
-    return plan, workload
+    if request is not None and (
+        request.argv != workload.argv
+        or request.resolved_working_directory != workload.working_directory
+        or list(request.artifacts.inputs) != workload.inputs
+        or list(request.artifacts.outputs) != workload.outputs
+        or request.resources != workload.resources
+        or request.execution != workload.constraints
+        or (
+            request.resolved_parent_experiment_id
+            != workload.parent_experiment_id
+        )
+    ):
+        raise ValueError("staged request does not match its workload")
+    return plan, workload, request
 
 
 def _validate_staged_models(

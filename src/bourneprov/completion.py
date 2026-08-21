@@ -50,7 +50,7 @@ _SCRIPTS = {
     command="${COMP_WORDS[1]}"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "run list show compare trace discover inventory plan execute execution completion" -- "$current") )
+        COMPREPLY=( $(compgen -W "run list show compare trace discover inventory plan execute execution request completion" -- "$current") )
     elif [[ $command == "show" || $command == "compare" ]]; then
         COMPREPLY=( $(compgen -W "$(bourne completion --candidates "$current")" -- "$current") )
     fi
@@ -60,7 +60,7 @@ complete -F _bourne_completion bourne
     "zsh": r'''#compdef bourne
 _bourne() {
     local -a commands candidates
-    commands=(run list show compare trace discover inventory plan execute execution completion)
+    commands=(run list show compare trace discover inventory plan execute execution request completion)
 
     if (( CURRENT == 2 )); then
         _describe 'bourne command' commands
@@ -76,7 +76,7 @@ compdef _bourne bourne
     bourne completion --candidates "$current"
 end
 
-complete -c bourne -f -n 'not __fish_seen_subcommand_from run list show compare trace discover inventory plan execute execution completion' -a 'run list show compare trace discover inventory plan execute execution completion'
+complete -c bourne -f -n 'not __fish_seen_subcommand_from run list show compare trace discover inventory plan execute execution request completion' -a 'run list show compare trace discover inventory plan execute execution request completion'
 complete -c bourne -f -n '__fish_seen_subcommand_from show compare' -a '(__bourne_experiment_references)'
 ''',
 }

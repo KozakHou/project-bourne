@@ -12,6 +12,14 @@ from typing import Callable, Protocol
 
 from .bounded_subprocess import BoundedCommandResult, run_bounded_command
 from .compute_worker import execute_plan
+from .execution_outcomes import (
+    ExecutionTelemetrySummary,
+    VerificationRun,
+    add_scheduler_wait,
+    build_telemetry_summary,
+    evaluate_verification,
+)
+from .execution_request import ExecutionRequest
 from .identity import current_process_identity
 from .inventory_models import InventorySnapshot
 from .worker_bundle import build_worker_zipapp, write_staged_plan
@@ -96,7 +104,10 @@ class DirectBackend:
         self.store.update_execution_state(
             execution.id, "preflight", utc_now(), {"backend": self.name}
         )
-        result = execute_plan(plan, workload, execution.id)
+        request = self.store.request_for_workload(workload.id)
+        result = execute_plan(
+            plan, workload, execution.id, request=request
+        )
         _import_result(self.store, result)
         return result
 
@@ -129,7 +140,11 @@ class SchedulerBackend:
         staging.mkdir(parents=True, exist_ok=False)
         worker_path = build_worker_zipapp(staging / "worker.pyz")
         plan_path = write_staged_plan(
-            staging / "plan.json", execution.id, plan, workload
+            staging / "plan.json",
+            execution.id,
+            plan,
+            workload,
+            self.store.request_for_workload(workload.id),
         )
         result_path = staging / "result.json"
         target_name = _target_name(plan, inventory)
@@ -644,6 +659,25 @@ def _target_name(plan: ExecutionPlan, inventory: InventorySnapshot) -> str | Non
 
 def _import_result(store: ExecutionStore, result: WorkerResult) -> None:
     details: dict[str, object] = {"preflight": result.preflight}
+    expected_request = store.request_for_execution(result.execution_id)
+    if result.protocol_version >= 2:
+        if expected_request is None or result.request_id != expected_request.id:
+            raise BackendError("worker result request does not match the immutable plan")
+        _validate_request_outcomes(store, result, expected_request)
+    elif result.request_id is not None or result.telemetry is not None or result.verification is not None:
+        raise BackendError("released v0.4 worker results cannot carry v0.5 outcomes")
+    telemetry = result.telemetry
+    scheduler_job = store.get_scheduler_job(result.execution_id)
+    if (
+        telemetry is not None
+        and scheduler_job is not None
+        and result.experiment is not None
+    ):
+        telemetry = add_scheduler_wait(
+            telemetry,
+            submitted_at=scheduler_job.submitted_at,
+            execution_started_at=result.experiment.started_at,
+        )
     if result.experiment is None:
         store.import_worker_failure(
             result.execution_id, result.allocation, state=result.state,
@@ -654,6 +688,8 @@ def _import_result(store: ExecutionStore, result: WorkerResult) -> None:
             result.execution_id, result.experiment, result.artifacts,
             result.lineage, result.allocation, state=result.state,
             occurred_at=result.created_at, details=details,
+            telemetry=telemetry,
+            verification=result.verification,
         )
 
 
@@ -669,6 +705,66 @@ def _validate_result_against_plan(
         or experiment.working_directory != plan.working_directory
     ):
         raise BackendError("worker experiment does not match the immutable plan")
+
+
+def _validate_request_outcomes(
+    store: ExecutionStore,
+    result: WorkerResult,
+    request: ExecutionRequest,
+) -> None:
+    experiment = result.experiment
+    if experiment is None:
+        return
+    execution = store.get_execution(result.execution_id)
+    plan = store.get_plan(execution.plan_id)
+    expected_verification = evaluate_verification(
+        request, result.execution_id, experiment, result.artifacts
+    )
+    if result.verification is None or _verification_semantics(
+        result.verification
+    ) != _verification_semantics(expected_verification):
+        raise BackendError(
+            "worker verification does not match captured artifact evidence"
+        )
+    expected_telemetry = build_telemetry_summary(
+        request,
+        plan,
+        result.execution_id,
+        experiment,
+        result.artifacts,
+        result.allocation,
+    )
+    if _telemetry_semantics(result.telemetry) != _telemetry_semantics(
+        expected_telemetry
+    ):
+        raise BackendError("worker telemetry does not match captured execution evidence")
+
+
+def _verification_semantics(value: VerificationRun | None) -> object:
+    if value is None:
+        return None
+    return {
+        "aggregate_state": value.aggregate_state,
+        "source": value.source,
+        "checks": [
+            {
+                "ordinal": item.ordinal,
+                "check_type": item.check_type,
+                "output_path": item.output_path,
+                "state": item.state,
+                "evidence": item.evidence,
+            }
+            for item in value.checks
+        ],
+    }
+
+
+def _telemetry_semantics(value: ExecutionTelemetrySummary | None) -> object:
+    if value is None:
+        return None
+    payload = value.to_dict()
+    payload.pop("id", None)
+    return payload
 
 
 def _execution_state(observation: SchedulerObservation) -> str:

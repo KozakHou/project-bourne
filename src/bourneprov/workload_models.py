@@ -330,6 +330,9 @@ class ExecutionView:
     scheduler_job: SchedulerJob | None
     allocations: list[AllocationObservation]
     experiment_id: str | None
+    request_id: str | None = None
+    telemetry: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -62,6 +62,7 @@ def format_execution(view: ExecutionView) -> str:
     lines = [
         f"Execution: {execution.id}", f"State: {execution.state}",
         f"Backend: {execution.backend}", f"Plan: {plan.id}",
+        f"Request: {view.request_id or 'unavailable (pre-v0.5 plan)'}",
         f"Workload: {view.workload.id}",
         f"Inventory: {plan.inventory_snapshot_id}",
         f"Command: {shlex.join(plan.argv)}",
@@ -90,6 +91,22 @@ def format_execution(view: ExecutionView) -> str:
             ]
         )
     lines.append(f"Actual experiment: {view.experiment_id or 'unavailable'}")
+    lines.append(
+        "Verification: "
+        + (
+            "unavailable"
+            if view.verification is None
+            else str(view.verification["aggregate_state"])
+        )
+    )
+    lines.append(
+        "Telemetry: "
+        + (
+            "off or unavailable"
+            if view.telemetry is None
+            else str(view.telemetry["state"])
+        )
+    )
     lines.append("Allocated resources:")
     if view.allocations:
         for allocation in view.allocations:

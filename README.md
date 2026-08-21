@@ -9,9 +9,11 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-This source tree is Project Bourne v0.4.0. Package releases are installed from
-PyPI with `pip install bourneprov`. Use `bourne --version` to confirm which
-release is active, or install this repository checkout to test its exact state.
+This source tree is the Project Bourne v0.5.0 release candidate. Until v0.5.0
+is tagged and published, the latest public release remains v0.4.0 and is
+installed from PyPI with `pip install bourneprov`. Use `bourne --version` to
+confirm which version is active, or install this repository checkout to test
+its exact state.
 
 ~~~bash
 python -m pip install bourneprov
@@ -32,6 +34,81 @@ bourne run mpirun -np 64 ./solver
 
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
+
+## One-file execution requests (v0.5.0)
+
+An execution can now be described once in a bounded, versioned JSON request:
+
+~~~json
+{
+  "kind": "bourne.execution-request",
+  "version": 1,
+  "command": ["python", "train.py", "--case", "case1"],
+  "artifacts": {
+    "inputs": ["config.yaml"],
+    "outputs": ["result.h5"]
+  },
+  "resources": {"cpus": 8, "gpus": 1, "walltime": "2h"},
+  "execution": {"backend": "direct"},
+  "verification": {
+    "checks": [
+      {"type": "output_exists", "path": "result.h5"},
+      {"type": "output_min_bytes", "path": "result.h5", "min_bytes": 1024}
+    ]
+  }
+}
+~~~
+
+Save it as `bourne.json`, then use the same intent for planning or execution:
+
+~~~bash
+bourne request validate bourne.json
+bourne request show bourne.json
+
+bourne discover
+bourne plan --request bourne.json
+bourne execute --request bourne.json
+~~~
+
+Create a minimal request without executing or discovering anything:
+
+~~~bash
+bourne request init --output bourne.json -- python train.py
+bourne request schema > execution-request-v1.schema.json
+~~~
+
+Existing flag-based commands remain supported. They compile into the same
+`ExecutionRequest → WorkloadSpec → ExecutionPlan` pipeline rather than a
+parallel implementation:
+
+~~~bash
+bourne execute --backend direct --cpus 2 --output result.txt -- python script.py
+~~~
+
+For a request file, a relative `working_directory` is resolved from the
+request file's directory. Declared artifacts are then resolved from that
+scientific working directory. Bourne preserves both the lexical and resolved
+working-directory values and does not expand `$HOME`, evaluate shell syntax,
+import project code, or execute anything while parsing or planning.
+
+Parent references follow the same intent-preserving rule. A request may use
+`latest`, `@N`, a unique prefix, or a full ULID. Bourne retains that requested
+value while separately recording the canonical parent ULID used by the compiled
+workload.
+
+Summary telemetry is enabled by default and uses already captured facts: wall
+time, UTF-8 stdout/stderr byte counts, known artifact byte totals, requested
+resources, observed allocation, and scheduler queue timing when timestamps
+establish it. `"telemetry": {"mode": "off"}` disables the summary. Missing
+metrics remain unavailable, never zero.
+
+The initial deterministic verification checks are `output_exists`,
+`output_min_bytes`, and `output_sha256`. They evaluate only captured declared
+output `Artifact` records. Verification is persisted separately from process
+status: an experiment may be `completed` while verification is `failed` or
+`unknown`. These checks establish artifact facts, not general scientific
+validity. See [Execution requests, telemetry, and verification](docs/EXECUTION_REQUESTS.md)
+for the exact contract and safety limits.
 
 ## Workload planning and execution (v0.4.0)
 
@@ -239,8 +316,8 @@ bourne show @1
 On POSIX systems, Bourne uses a dedicated process group so Ctrl+C normally
 terminates descendants without targeting unrelated processes.
 
-Execution success is not scientific verification. Verification remains a
-separate future capability.
+Execution success is not verification, and deterministic artifact verification
+is not general scientific validity. Bourne records these states separately.
 
 ## Local storage and migration
 
@@ -256,17 +333,19 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1, v0.2.0, or v0.3.0 database with v0.4.0 performs
-deterministic transactional migrations through schema 4. Existing completed,
-failed, and interrupted
-experiments, artifacts, lineage, and execution-context observations remain
-readable. Unknown or newer schema versions fail explicitly; Bourne never
-resets an existing database. Each new discovery creates a separate immutable
+Opening a v0.1.1, v0.2.0, v0.3.0, or v0.4.0 database with this release
+candidate performs deterministic transactional migrations through schema 5.
+Existing experiments, artifacts, lineage, inventories, workloads, plans,
+executions, scheduler jobs, allocations, events, and experiment links remain
+readable. Migration does not invent `ExecutionRequest` history for v0.4
+records. Unknown or newer schema versions fail explicitly; Bourne never resets
+an existing database. Each new discovery creates a separate immutable
 snapshot.
 
 ## Release validation
 
-The repository version is 0.4.0. The runtime has zero third-party dependencies.
+The repository version is `0.5.0`. The runtime has zero third-party
+dependencies.
 
 Run the source-tree tests with:
 
@@ -277,6 +356,6 @@ PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
 stdout and stderr are still accumulated in memory before final persistence.
 Disk-spooled experiment logs, automatic artifact discovery, artifact archival,
 automatic dependency installation, automatic module loading, container
-orchestration, SSH execution, remote copying, profiling, scientific
-verification, MCP, and agents remain future work. See docs/VISION.md for the
-longer-term direction.
+orchestration, SSH execution, remote copying, utilization sampling, profiling,
+arbitrary verification scripts, broad scientific-validity inference, MCP, and
+agents remain future work. See docs/VISION.md for the longer-term direction.

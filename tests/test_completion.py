@@ -22,6 +22,7 @@ class CompletionTests(unittest.TestCase):
         self.assertIn("trace", script)
         self.assertIn("discover", script)
         self.assertIn("inventory", script)
+        self.assertIn("request", script)
 
     def test_completion_cli_prints_generated_script(self) -> None:
         output = io.StringIO()
@@ -38,6 +39,7 @@ class CompletionTests(unittest.TestCase):
         self.assertIn("trace", script)
         self.assertIn("discover", script)
         self.assertIn("inventory", script)
+        self.assertIn("request", script)
 
     def test_fish_completion_generation(self) -> None:
         script = completion_script("fish")
@@ -46,6 +48,7 @@ class CompletionTests(unittest.TestCase):
         self.assertIn("trace", script)
         self.assertIn("discover", script)
         self.assertIn("inventory", script)
+        self.assertIn("request", script)
 
     def test_candidates_include_ids_and_relative_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

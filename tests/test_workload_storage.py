@@ -7,11 +7,13 @@ from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
+from bourneprov.execution_request import execution_request_from_cli
+from bourneprov.execution_service import request_to_workload
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.resolver import resolve_execution
 from bourneprov.workload import inspect_workload, utc_now
 from bourneprov.workload_models import ExecutionAttempt, ExecutionConstraints
-from bourneprov.workload_storage import ExecutionStore
+from bourneprov.workload_storage import ExecutionStore, WorkloadNotFound
 from tests.v04_fixtures import inventory_snapshot
 
 
@@ -43,6 +45,39 @@ class WorkloadStorageTests(unittest.TestCase):
                 store.save_workload(workload)
             with self.assertRaises(sqlite3.IntegrityError):
                 store.save_plan(plan)  # type: ignore[arg-type]
+
+    def test_request_and_compiled_workload_round_trip_and_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExecutionStore(root / "bourne.sqlite3")
+            request = execution_request_from_cli(
+                ["solver", "case.dat"], cwd=root,
+                execution=ExecutionConstraints(backend="direct"),
+                source_kind="sdk",
+            )
+            workload = request_to_workload(request)
+            store.save_request_with_workload(request, workload)
+            reloaded = store.get_request(request.id)
+            linked = store.request_for_workload(workload.id)
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.save_request(request)
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.save_request_with_workload(request, workload)
+            self.assertEqual(reloaded, request)
+            self.assertEqual(linked, request)
+            self.assertEqual(store.count_requests(), 1)
+
+    def test_mismatched_request_and_workload_create_no_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ExecutionStore(root / "bourne.sqlite3")
+            request = execution_request_from_cli(["solver"], cwd=root)
+            workload = inspect_workload(["other"], cwd=root)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                store.save_request_with_workload(request, workload)
+            self.assertEqual(store.count_requests(), 0)
+            with self.assertRaises(WorkloadNotFound):
+                store.get_workload(workload.id)
 
     def test_plan_rejects_target_from_another_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
