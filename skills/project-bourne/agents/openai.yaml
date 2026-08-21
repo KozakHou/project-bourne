@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Bourne"
+  short_description: "Plan and preserve scientific execution provenance"
+  default_prompt: "Use Project Bourne to translate explicit scientific execution intent into an ExecutionRequest, plan safely, preserve ambiguity, and execute only when authorized."

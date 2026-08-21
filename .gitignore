@@ -6,6 +6,8 @@ __pycache__/
 htmlcov/
 build/
 dist/
+node_modules/
+npm-debug.log*
 .venv/
 venv/
 .env

@@ -140,6 +140,23 @@ class ExecutionStore:
             else ExecutionRequest.from_dict(json.loads(row["request_json"]))
         )
 
+    def workload_for_request(self, request_id: str) -> WorkloadSpec | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT workload.spec_json FROM workload_specs AS workload
+                JOIN execution_request_workload_links AS link
+                    ON link.workload_id = workload.id
+                WHERE link.request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+        return (
+            None
+            if row is None
+            else WorkloadSpec.from_dict(json.loads(row["spec_json"]))
+        )
+
     def request_for_execution(self, execution_id: str) -> ExecutionRequest | None:
         with self._connection() as connection:
             row = connection.execute(

@@ -109,6 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"bourne {__version__}")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
+    subparsers.add_parser(
+        "mcp", help="run the optional Project Bourne MCP server over stdio"
+    )
+
     run_parser = subparsers.add_parser("run", help="run and record an arbitrary command")
     run_parser.add_argument(
         "--input", action="append", default=[], metavar="PATH", help="declare an input file"
@@ -240,6 +244,22 @@ def _get(store: ExperimentStore, reference: str):
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+
+    if arguments.subcommand == "mcp":
+        try:
+            from .mcp_server import run_mcp_server
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"anyio", "mcp", "pydantic"}:
+                raise
+            print(
+                "bourne: MCP support is not installed. Install it with: "
+                "python -m pip install 'bourneprov[mcp]'",
+                file=sys.stderr,
+            )
+            return 2
+        run_mcp_server()
+        return 0
+
     store = ExperimentStore(default_database_path())
     inventory_store = InventoryStore(default_database_path())
     execution_store = ExecutionStore(default_database_path())

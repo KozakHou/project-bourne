@@ -1,0 +1,37 @@
+{
+  "name": "@project-bourne/mcp",
+  "version": "0.6.0-dev.0",
+  "description": "Launcher for the canonical Project Bourne MCP server",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "project-bourne-mcp": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KozakHou/project-bourne.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/KozakHou/project-bourne#readme",
+  "bugs": {
+    "url": "https://github.com/KozakHou/project-bourne/issues"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-isolation=none dist/test/runtime.test.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -9,11 +9,9 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-This source tree is the Project Bourne v0.5.0 release candidate. Until v0.5.0
-is tagged and published, the latest public release remains v0.4.0 and is
-installed from PyPI with `pip install bourneprov`. Use `bourne --version` to
-confirm which version is active, or install this repository checkout to test
-its exact state.
+The latest public release is v0.5.0. This source tree is developing v0.6.0,
+which adds an optional MCP adapter and portable agent-facing assets without
+changing Bourne's deterministic execution core.
 
 ~~~bash
 python -m pip install bourneprov
@@ -22,6 +20,42 @@ bourne run python examples/demo.py
 bourne list
 bourne show @1
 ~~~
+
+## Agent and MCP workflow (v0.6 development)
+
+From this development checkout, install the optional official MCP SDK
+integration and run the canonical local stdio server:
+
+~~~bash
+python -m pip install -e ".[mcp]"
+bourne mcp
+~~~
+
+After v0.6 is published, the intended install and zero-runtime-dependency Node
+launcher UX (Node.js 24+) is:
+
+~~~bash
+python -m pip install "bourneprov[mcp]"
+npx -y @project-bourne/mcp
+~~~
+
+An MCP-compatible agent can translate an explicit request such as “Run this
+simulation using four GPUs and preserve provenance” into ExecutionRequest v1,
+ask Bourne to plan it, show the deterministic resolution, and execute the
+immutable plan after execution intent is established. Bourne itself does not
+interpret unconstrained natural language and does not call another model.
+
+The agent path is deliberately two-phase:
+
+~~~text
+agent intent → ExecutionRequest v1 → bourne_plan → inspect → bourne_execute_plan
+~~~
+
+Planning never runs the workload or silently discovers infrastructure.
+Ambiguous targets and unknown facts remain unresolved. MCP annotations are host
+UX hints; Bourne Core still enforces immutable plans, exact argv, scheduler job
+ownership, artifact semantics, and provenance. See [MCP integration](docs/MCP.md)
+and [Agent guidance](docs/AGENTS.md).
 
 Bourne wraps any executable, not only Python:
 
