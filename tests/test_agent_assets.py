@@ -42,6 +42,7 @@ class AgentAssetTests(unittest.TestCase):
         )
         self.assertEqual(package["name"], "@project-bourne/mcp")
         self.assertEqual(package["version"], "0.6.0-dev.0")
+        self.assertEqual(package["publishConfig"], {"access": "public"})
         self.assertNotIn("dependencies", package)
         self.assertEqual(package["engines"]["node"], ">=22")
         self.assertIn('PYTHON_VERSION = "0.6.0.dev0"', runtime)

@@ -20,6 +20,9 @@
     "ai-agents"
   ],
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "project-bourne-mcp": "dist/src/cli.js"
