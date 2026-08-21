@@ -1,7 +1,24 @@
 {
   "name": "@project-bourne/mcp",
   "version": "0.6.0-dev.0",
-  "description": "Launcher for the canonical Project Bourne MCP server",
+  "description": "Plan and execute reproducible scientific and engineering workloads across local compute, GPUs, Slurm, and PBS with preserved experiment provenance, artifacts, lineage, telemetry, and verification.",
+  "mcpName": "io.github.KozakHou/project-bourne",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "scientific-computing",
+    "scientific-workflows",
+    "reproducibility",
+    "provenance",
+    "experiment-tracking",
+    "hpc",
+    "slurm",
+    "pbs",
+    "gpu",
+    "simulation",
+    "numerical-computing",
+    "ai-agents"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -14,7 +31,7 @@
     "NOTICE"
   ],
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",
@@ -27,11 +44,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test --test-isolation=none dist/test/runtime.test.js",
+    "test": "npm run build && node dist/test/runtime.test.js",
     "pack:check": "npm pack --dry-run"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.9.0"
   }
 }

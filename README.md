@@ -4,10 +4,13 @@
 
 > **Universal experiment provenance and reproducibility for science and engineering.**
 
-Project Bourne records how arbitrary scientific and engineering commands were
-executed, which files were explicitly used and produced, and how one experiment
-derived from another. It is local-first, framework-agnostic, and requires no
-changes to the program being recorded.
+Project Bourne is agent-native execution and provenance infrastructure for
+reproducible scientific and engineering workloads across local compute, GPUs,
+and HPC schedulers. It records how arbitrary commands were executed, which
+files were explicitly used and produced, and how one experiment derived from
+another. It is local-first, framework-agnostic, and requires no changes to the
+program being recorded. Agent-native means agents can use the same structured,
+deterministic services as humans; Bourne contains no embedded LLM.
 
 The latest public release is v0.5.0. This source tree is developing v0.6.0,
 which adds an optional MCP adapter and portable agent-facing assets without
@@ -19,6 +22,9 @@ python -m pip install bourneprov
 bourne run python examples/demo.py
 bourne list
 bourne show @1
+
+# With an ExecutionRequest v1 document:
+bourne execute --request bourne.json
 ~~~
 
 ## Agent and MCP workflow (v0.6 development)
@@ -32,12 +38,18 @@ bourne mcp
 ~~~
 
 After v0.6 is published, the intended install and zero-runtime-dependency Node
-launcher UX (Node.js 24+) is:
+launcher UX (Node.js 22+) is:
 
 ~~~bash
 python -m pip install "bourneprov[mcp]"
 npx -y @project-bourne/mcp
 ~~~
+
+The stable official MCP Registry identity is
+`io.github.KozakHou/project-bourne`, and the portable Agent Skill is at
+[`skills/project-bourne`](skills/project-bourne). Neither the v0.6 npm package
+nor its Registry entry is public while this development branch is under
+review; the commands above describe the post-publication agent entrypoints.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v1,

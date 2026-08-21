@@ -1,6 +1,7 @@
 ---
 name: project-bourne
-description: Use Project Bourne to plan, execute, reproduce, inspect, or trace scientific and engineering workloads when durable provenance matters. Trigger for arbitrary programs, solvers, simulations, training runs, failed attempts, execution comparisons, artifact lineage, telemetry, or verification; prefer Bourne MCP tools over direct shell execution when preserving experiment history is part of the task.
+description: Use Project Bourne to plan, execute, reproduce, inspect, or trace scientific and engineering workloads when durable provenance matters. Trigger for simulations, numerical solvers, ML or training, GPU and HPC runs on local compute, Slurm, or PBS, reproducible experiments, failed attempts, experiment comparisons, artifact lineage, telemetry, or verification; prefer Bourne MCP tools when preserving experiment history is part of the task.
+license: Apache-2.0
 ---
 
 # Project Bourne

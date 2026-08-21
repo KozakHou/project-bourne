@@ -13,8 +13,11 @@ preserving the v0.5 deterministic execution and provenance model.
   an existing immutable plan as separate actions.
 - Product errors are machine-readable, uncertainty is preserved, and process
   status, verification, telemetry, and scientific validity remain separate.
-- `@project-bourne/mcp` is a zero-runtime-dependency Node.js 24+ launcher with
+- `@project-bourne/mcp` is a zero-runtime-dependency Node.js 22+ launcher with
   exact Python-version coupling, diagnostics, and optional isolated bootstrap.
+- Official MCP Registry metadata uses the stable identity
+  `io.github.KozakHou/project-bourne`; it is published only after the matching
+  final npm package exists.
 - `skills/project-bourne/SKILL.md` provides portable, vendor-neutral behavioral
   guidance without granting broad shell permission.
 

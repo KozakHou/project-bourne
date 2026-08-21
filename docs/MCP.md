@@ -33,7 +33,7 @@ npx -y @project-bourne/mcp --doctor
 npx -y @project-bourne/mcp --no-bootstrap
 ```
 
-It requires Node.js 24+. It first locates Python 3.10+ with the exact compatible
+It requires Node.js 22+. It first locates Python 3.10+ with the exact compatible
 `bourneprov` and MCP extra. If none exists, it may install that exact release
 into a private versioned user cache. It never installs into an active project,
 virtual environment, Conda environment, or system Python; never uses `sudo`;
@@ -44,6 +44,23 @@ Development versions are coupled exactly:
 ```text
 @project-bourne/mcp 0.6.0-dev.0 → bourneprov 0.6.0.dev0
 ```
+
+## Discovery and Registry identity
+
+The stable official MCP Registry identity is:
+
+```text
+io.github.KozakHou/project-bourne
+```
+
+The root `server.json` describes the existing local stdio server and points to
+the npm package `@project-bourne/mcp`. Its name must equal the package's
+`mcpName`; deterministic repository tests enforce that identity and version
+coupling. No HTTP or hosted transport is advertised.
+
+The development npm package and Registry entry are not public yet. Final
+Registry publication must occur only after the matching final npm version is
+available and its `mcpName` has been verified.
 
 ## Generic host configuration
 

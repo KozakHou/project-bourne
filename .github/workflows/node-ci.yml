@@ -10,12 +10,13 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Node 24
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        node-version: ["22", "24"]
 
     defaults:
       run:
@@ -28,7 +29,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: npm
           cache-dependency-path: packages/mcp/package-lock.json
 

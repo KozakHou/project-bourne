@@ -57,3 +57,56 @@ The release workflow checks that the Git tag matches the package version,
 builds one wheel and one source distribution, validates their metadata, runs the
 full test suite against the installed wheel, publishes through OIDC, and
 attaches the same distributions to the GitHub Release.
+
+## v0.6 multi-registry sequence
+
+The existing GitHub Release workflow is the authority for Python publication,
+so the final v0.6 order is:
+
+1. Merge the reviewed v0.6 pull request and require the full Python and Node
+   matrices to pass on `main`.
+2. Prepare and review the final Python and npm versions and package contents.
+3. Publish the `v0.6.0` GitHub Release from the intended `main` commit. Wait for
+   its existing trusted-publishing workflow to publish and verify
+   `bourneprov==0.6.0` on PyPI and attach the Python distributions.
+4. Publish `@project-bourne/mcp@0.6.0` to npm only from a maintainer identity
+   that controls the `@project-bourne` scope.
+5. Verify the public npm tarball, exact Python-version coupling, and that its
+   `mcpName` is `io.github.KozakHou/project-bourne`.
+6. Publish the root `server.json` with the official `mcp-publisher`, then verify
+   the official Registry API and search result.
+7. Verify public GitHub Skill search against generic scientific-execution
+   intents after the Skill is merged.
+
+Never publish Registry metadata for an npm version that does not yet exist.
+Do not run `gh skill publish` as part of v0.6 unless its interaction with the
+existing `v0.6.0` tag and GitHub Release has been reviewed; the merged public
+`SKILL.md` remains discoverable without a second release.
+
+For future Registry automation, use a post-npm, non-pull-request GitHub Actions
+job with `id-token: write`, `mcp-publisher login github-oidc`, and
+`mcp-publisher publish`. Pin and verify the publisher tooling, require the final
+npm package to exist first, and do not add a long-lived Registry secret. This
+strategy is documented here but is intentionally not activated during the
+v0.6 development hardening pass.
+
+## GitHub discovery metadata
+
+After merge, add this focused topic set as an explicit repository-maintenance
+action (repository topics are not changed implicitly by the code pull request):
+
+```text
+scientific-computing
+reproducibility
+provenance
+experiment-tracking
+mcp
+model-context-protocol
+agent-skills
+ai-agents
+hpc
+slurm
+pbs
+gpu
+simulation
+```
