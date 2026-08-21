@@ -9,10 +9,11 @@ executed, which files were explicitly used and produced, and how one experiment
 derived from another. It is local-first, framework-agnostic, and requires no
 changes to the program being recorded.
 
-This source tree is the Project Bourne v0.5.0 development branch
-(`0.5.0.dev0`). The latest public release remains v0.4.0 and is installed from
-PyPI with `pip install bourneprov`. Use `bourne --version` to confirm which
-version is active, or install this repository checkout to test its exact state.
+This source tree is the Project Bourne v0.5.0 release candidate. Until v0.5.0
+is tagged and published, the latest public release remains v0.4.0 and is
+installed from PyPI with `pip install bourneprov`. Use `bourne --version` to
+confirm which version is active, or install this repository checkout to test
+its exact state.
 
 ~~~bash
 python -m pip install bourneprov
@@ -34,7 +35,7 @@ bourne run mpirun -np 64 ./solver
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
 
-## One-file execution requests (v0.5.0 development)
+## One-file execution requests (v0.5.0)
 
 An execution can now be described once in a bounded, versioned JSON request:
 
@@ -332,8 +333,8 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1, v0.2.0, v0.3.0, or v0.4.0 database with this development
-version performs deterministic transactional migrations through schema 5.
+Opening a v0.1.1, v0.2.0, v0.3.0, or v0.4.0 database with this release
+candidate performs deterministic transactional migrations through schema 5.
 Existing experiments, artifacts, lineage, inventories, workloads, plans,
 executions, scheduler jobs, allocations, events, and experiment links remain
 readable. Migration does not invent `ExecutionRequest` history for v0.4
@@ -343,7 +344,7 @@ snapshot.
 
 ## Release validation
 
-The repository version is `0.5.0.dev0`. The runtime has zero third-party
+The repository version is `0.5.0`. The runtime has zero third-party
 dependencies.
 
 Run the source-tree tests with:
