@@ -1,20 +1,23 @@
 # Project Bourne
 
-> **Every experiment has a history.**
+Project Bourne is open-source execution and provenance infrastructure for
+reproducible scientific and engineering workloads.
 
-> **Universal experiment provenance and reproducibility for science and engineering.**
+It plans and executes computational experiments across local machines, GPUs,
+Slurm, and PBS while preserving inputs, outputs, execution context, artifact
+lineage, telemetry, verification, and the history needed to reproduce a
+result.
 
-Project Bourne is agent-native execution and provenance infrastructure for
-reproducible scientific and engineering workloads across local compute, GPUs,
-and HPC schedulers. It records how arbitrary commands were executed, which
-files were explicitly used and produced, and how one experiment derived from
-another. It is local-first, framework-agnostic, and requires no changes to the
-program being recorded. Agent-native means agents can use the same structured,
-deterministic services as humans; Bourne contains no embedded LLM.
+It is designed for researchers, students from undergraduate through PhD level,
+faculty, research engineers, computational scientists, scientific software
+users, and scientific-computing teams across academia, public research, and
+industry R&D.
 
-The latest public release is v0.5.0. This source tree is developing v0.6.0,
-which adds an optional MCP adapter and portable agent-facing assets without
-changing Bourne's deterministic execution core.
+## Quick Start
+
+### Human
+
+The human CLI is public today:
 
 ~~~bash
 python -m pip install bourneprov
@@ -23,33 +26,68 @@ bourne run python examples/demo.py
 bourne list
 bourne show @1
 
-# With an ExecutionRequest v1 document:
+# Or execute an ExecutionRequest v1 document:
 bourne execute --request bourne.json
 ~~~
 
-## Agent and MCP workflow (v0.6 development)
+### Agent / MCP
 
-From this development checkout, install the optional official MCP SDK
-integration and run the canonical local stdio server:
-
-~~~bash
-python -m pip install -e ".[mcp]"
-bourne mcp
-~~~
-
-After v0.6 is published, the intended install and zero-runtime-dependency Node
-launcher UX (Node.js 22+) is:
+These v0.6.0 entrypoints become public only after the matching Python and npm
+packages are published:
 
 ~~~bash
 python -m pip install "bourneprov[mcp]"
 npx -y @project-bourne/mcp
 ~~~
 
-The stable official MCP Registry identity is
-`io.github.KozakHou/project-bourne`, and the portable Agent Skill is at
-[`skills/project-bourne`](skills/project-bourne). Neither the v0.6 npm package
-nor its Registry entry is public while this development branch is under
-review; the commands above describe the post-publication agent entrypoints.
+To evaluate the release candidate from this checkout instead:
+
+~~~bash
+python -m pip install -e ".[mcp]"
+bourne mcp
+~~~
+
+## Why Bourne
+
+Bourne wraps arbitrary executables without requiring changes to the scientific
+program. It is local-first and framework-agnostic: Python, compiled solvers,
+Julia, MPI programs, and other commands use the same durable experiment model.
+
+~~~bash
+bourne run bash -c "echo hello"
+bourne run ./solver case.yaml
+bourne run julia simulation.jl
+bourne run mpirun -np 64 ./solver
+~~~
+
+Program stdout and stderr remain visible during execution and are preserved in
+the experiment record.
+
+## Architecture
+
+Bourne Core owns deterministic execution, planning, storage, and provenance.
+Humans can use it through the CLI or Python services; agents can use the same
+services through the optional MCP adapter:
+
+~~~text
+             Project Bourne Core
+                    │
+       ┌────────────┼────────────┐
+       │            │            │
+      CLI          SDK          MCP
+    humans                     agents
+~~~
+
+The agent interface is an optional access path, not Bourne's product identity.
+MCP works without the portable Skill, and Bourne contains no embedded LLM.
+
+## Agent and MCP Integration
+
+The canonical local stdio server is `bourne mcp`. The stable official MCP
+Registry identity is `io.github.KozakHou/project-bourne`, and the portable
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). Neither the
+v0.6.0 npm package nor its Registry entry is public while this release
+candidate is under review.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v1,
@@ -69,19 +107,7 @@ UX hints; Bourne Core still enforces immutable plans, exact argv, scheduler job
 ownership, artifact semantics, and provenance. See [MCP integration](docs/MCP.md)
 and [Agent guidance](docs/AGENTS.md).
 
-Bourne wraps any executable, not only Python:
-
-~~~bash
-bourne run bash -c "echo hello"
-bourne run ./solver case.yaml
-bourne run julia simulation.jl
-bourne run mpirun -np 64 ./solver
-~~~
-
-Program stdout and stderr remain visible during execution and are preserved in
-the experiment record.
-
-## One-file execution requests (v0.5.0)
+## Execution Requests
 
 An execution can now be described once in a bounded, versioned JSON request:
 
@@ -156,7 +182,7 @@ status: an experiment may be `completed` while verification is `failed` or
 validity. See [Execution requests, telemetry, and verification](docs/EXECUTION_REQUESTS.md)
 for the exact contract and safety limits.
 
-## Workload planning and execution (v0.4.0)
+## Planning and Execution
 
 Project Bourne v0.4.0 adds a durable planning layer over v0.3 inventories:
 
@@ -247,7 +273,7 @@ environment variables, SSH into compute nodes, submit or cancel scheduler
 jobs, or modify environments. See [Compute-site discovery](docs/COMPUTE_SITE_DISCOVERY.md)
 for the exact topology, evidence, limits, and security semantics.
 
-## Artifacts and lineage
+## Provenance, Artifacts and Lineage
 
 Project Bourne v0.2 adds explicit input/output fingerprints, a minimal
 derived_from relationship, safe execution-context observations, and artifact
@@ -397,8 +423,8 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The repository version is `0.5.0`. The runtime has zero third-party
-dependencies.
+The repository version is `0.6.0`. The base runtime has zero third-party
+dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:
 
@@ -408,7 +434,8 @@ PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
 
 stdout and stderr are still accumulated in memory before final persistence.
 Disk-spooled experiment logs, automatic artifact discovery, artifact archival,
-automatic dependency installation, automatic module loading, container
-orchestration, SSH execution, remote copying, utilization sampling, profiling,
-arbitrary verification scripts, broad scientific-validity inference, MCP, and
-agents remain future work. See docs/VISION.md for the longer-term direction.
+automatic scientific dependency installation, automatic module loading,
+container orchestration, SSH execution, remote copying, utilization sampling,
+profiling, arbitrary verification scripts, broad scientific-validity
+inference, hosted HTTP MCP, embedded LLMs, and natural-language parsing remain
+outside v0.6.0. See docs/VISION.md for the longer-term direction.

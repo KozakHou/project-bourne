@@ -15,9 +15,9 @@ python -m pip install -e ".[mcp]"
 bourne mcp
 ```
 
-After v0.6 is published, use
-`python -m pip install "bourneprov[mcp]"`. The latest public release remains
-v0.5.0 while this document is on the v0.6 development branch.
+After v0.6.0 is published, use
+`python -m pip install "bourneprov[mcp]"`. During release-candidate review,
+install from the source checkout instead.
 
 The canonical entrypoint uses stdio only. Protocol frames use stdout; human
 diagnostics, logs, and direct workload output use stderr. Set
@@ -39,10 +39,10 @@ into a private versioned user cache. It never installs into an active project,
 virtual environment, Conda environment, or system Python; never uses `sudo`;
 and never invokes a shell. Bootstrap output goes to stderr.
 
-Development versions are coupled exactly:
+Release versions are coupled exactly:
 
 ```text
-@project-bourne/mcp 0.6.0-dev.0 → bourneprov 0.6.0.dev0
+@project-bourne/mcp 0.6.0 → bourneprov 0.6.0
 ```
 
 ## Discovery and Registry identity
@@ -58,7 +58,7 @@ the npm package `@project-bourne/mcp`. Its name must equal the package's
 `mcpName`; deterministic repository tests enforce that identity and version
 coupling. No HTTP or hosted transport is advertised.
 
-The development npm package and Registry entry are not public yet. Final
+The release-candidate npm package and Registry entry are not public yet. Final
 Registry publication must occur only after the matching final npm version is
 available and its `mcpName` has been verified.
 

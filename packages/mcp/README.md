@@ -23,4 +23,4 @@ Python Bourne core.
 
 The canonical official MCP Registry identity is
 `io.github.KozakHou/project-bourne`. Registry publication follows the matching
-final npm release; the development version is not published to the Registry.
+final npm release; the release candidate is not published to the Registry.

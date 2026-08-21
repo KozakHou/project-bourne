@@ -49,7 +49,7 @@ Before publishing, confirm that:
 7. Verify installation in a fresh environment:
 
    ```bash
-   python -m pip install bourneprov==0.5.0
+   python -m pip install bourneprov==0.6.0
    bourne --version
    ```
 
@@ -88,7 +88,7 @@ job with `id-token: write`, `mcp-publisher login github-oidc`, and
 `mcp-publisher publish`. Pin and verify the publisher tooling, require the final
 npm package to exist first, and do not add a long-lived Registry secret. This
 strategy is documented here but is intentionally not activated during the
-v0.6 development hardening pass.
+v0.6 release-candidate preparation.
 
 ## GitHub discovery metadata
 

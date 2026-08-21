@@ -63,8 +63,8 @@ function dependencies(
 test("versions and cache are exactly coupled and platform appropriate", () => {
   const root = mkdtempSync(join(tmpdir(), "bourne node Unicode 科學 "));
   const deps = dependencies(root, (() => probeValue()) as RuntimeDependencies["spawnSync"]);
-  assert.equal(NPM_VERSION, "0.6.0-dev.0");
-  assert.equal(PYTHON_VERSION, "0.6.0.dev0");
+  assert.equal(NPM_VERSION, "0.6.0");
+  assert.equal(PYTHON_VERSION, "0.6.0");
   assert.equal(
     cacheDirectory(deps),
     join(root, "cache", "project-bourne", "mcp", PYTHON_VERSION),
@@ -136,7 +136,7 @@ test("an incompatible Bourne version is never treated as a compatible runtime", 
   );
   assert.throws(
     () => selectRuntime(incompatible, { noBootstrap: true }),
-    /No compatible bourneprov 0\.6\.0\.dev0 MCP runtime/,
+    /No compatible bourneprov 0\.6\.0 MCP runtime/,
   );
 });
 

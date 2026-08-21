@@ -1,6 +1,6 @@
 {
   "name": "@project-bourne/mcp",
-  "version": "0.6.0-dev.0",
+  "version": "0.6.0",
   "description": "Plan and execute reproducible scientific and engineering workloads across local compute, GPUs, Slurm, and PBS with preserved experiment provenance, artifacts, lineage, telemetry, and verification.",
   "mcpName": "io.github.KozakHou/project-bourne",
   "keywords": [

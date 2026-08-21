@@ -9,8 +9,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const NPM_VERSION = "0.6.0-dev.0";
-export const PYTHON_VERSION = "0.6.0.dev0";
+export const NPM_VERSION = "0.6.0";
+export const PYTHON_VERSION = "0.6.0";
 export const MINIMUM_PYTHON = [3, 10] as const;
 
 const PROBE = [
