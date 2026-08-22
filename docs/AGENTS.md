@@ -22,11 +22,11 @@ scientific correctness.
 
 ## MCP connection
 
-An MCP-capable host connects to the local stdio server through `bourne mcp` or,
-after v0.6 publication, `npx -y @project-bourne/mcp`. The canonical Registry
-identity is `io.github.KozakHou/project-bourne`. MCP translates structured tool
-calls into the same Bourne Core services used by the CLI; it does not replace
-the resolver, scheduler backends, provenance store, or authorization boundary.
+An MCP-capable host connects to the local stdio server through `bourne mcp` or
+`npx -y @project-bourne/mcp@0.6.0`. The canonical Registry identity is
+`io.github.KozakHou/project-bourne`. MCP translates structured tool calls into
+the same Bourne Core services used by the CLI; it does not replace the resolver,
+scheduler backends, provenance store, or authorization boundary.
 
 ## Recommended agent sequence
 
