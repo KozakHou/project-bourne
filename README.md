@@ -32,15 +32,14 @@ bourne execute --request bourne.json
 
 ### Agent / MCP
 
-These v0.6.0 entrypoints become public only after the matching Python and npm
-packages are published:
+The v0.6.0 agent and MCP entrypoints are public:
 
 ~~~bash
-python -m pip install "bourneprov[mcp]"
-npx -y @project-bourne/mcp
+python -m pip install "bourneprov[mcp]==0.6.0"
+npx -y @project-bourne/mcp@0.6.0
 ~~~
 
-To evaluate the release candidate from this checkout instead:
+For development from a source checkout instead:
 
 ~~~bash
 python -m pip install -e ".[mcp]"
@@ -85,9 +84,8 @@ MCP works without the portable Skill, and Bourne contains no embedded LLM.
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne). Neither the
-v0.6.0 npm package nor its Registry entry is public while this release
-candidate is under review.
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.6.0
+npm package and matching Registry entry are public.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v1,
