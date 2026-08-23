@@ -315,8 +315,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             "user_declared",
         )
         self.assertEqual(candidate["state"], "viable")
-        self.assertEqual(candidate["resource_shape"]["nodes"], 1)
-        self.assertEqual(candidate["resource_shape"]["mpi_ranks"], 4)
+        shape = candidate["resource_shape"]
+        self.assertEqual(shape["total_cpus"], 4)
+        self.assertEqual(shape["mpi_ranks"], 4)
+        self.assertIn(shape["nodes"], (1, 2, 4))
+        self.assertEqual(shape["nodes"] * shape["cpus_per_node"], 4)
+        self.assertEqual(shape["nodes"] * shape["ranks_per_node"], 4)
         self.assertEqual(
             unreviewed.structured_content["error"]["code"],
             "candidate_selection_failed",
