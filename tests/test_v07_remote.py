@@ -246,7 +246,8 @@ class RemoteDiscoveryTests(unittest.TestCase):
             database = root / "bourne.sqlite3"
             site_service = SiteService(database)
             site = site_service.add_site(
-                "fake-hpc", ssh_host="fake", remote_project_root=str(root)
+                "fake-hpc", ssh_host="fake",
+                remote_project_root=str(root.resolve()),
             )
             site_service.remote_clients[site.id] = RemoteWorkerClient(
                 site, InProcessTransport()
@@ -270,7 +271,8 @@ class RemoteDiscoveryTests(unittest.TestCase):
             service = SiteService(database)
             site = service.add_site(
                 "remote-workstation", ssh_host="fake", scheduler_hint="none",
-                local_project_root=str(root), remote_project_root=str(root),
+                local_project_root=str(root.resolve()),
+                remote_project_root=str(root.resolve()),
             )
             snapshot = inventory_snapshot(root, executable=Path(sys.executable).name)
             snapshot = replace(snapshot, site_label=site.name)
@@ -307,7 +309,10 @@ class RemoteDiscoveryTests(unittest.TestCase):
             root = Path(directory)
             database = root / "bourne.sqlite3"
             service = SiteService(database)
-            site = service.add_site("fake", ssh_host="fake", remote_project_root=str(root))
+            site = service.add_site(
+                "fake", ssh_host="fake",
+                remote_project_root=str(root.resolve()),
+            )
             snapshot = inventory_snapshot(
                 root, scheduler_families=("slurm",),
                 executable=Path(sys.executable).name,
@@ -351,7 +356,8 @@ class FakeHPCEndToEndTests(unittest.TestCase):
         site_service = SiteService(database)
         site = site_service.add_site(
             "fake-hpc", ssh_host="fake", scheduler_hint="slurm",
-            local_project_root=str(local_root), remote_project_root=str(remote_root),
+            local_project_root=str(local_root.resolve()),
+            remote_project_root=str(remote_root.resolve()),
         )
         site_service.remote_clients[site.id] = RemoteWorkerClient(site, transport)
         executable_name = Path(sys.executable).name
