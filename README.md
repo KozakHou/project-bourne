@@ -85,14 +85,14 @@ resubmission.
 
 ### Agent / MCP
 
-The optional MCP adapter remains local stdio:
+The v0.6.0 agent and MCP entrypoints are public and remain local stdio:
 
 ~~~bash
-python -m pip install "bourneprov[mcp]"
+python -m pip install "bourneprov[mcp]==0.6.0"
 bourne mcp
 
 # Or use the public transparent launcher:
-npx -y @project-bourne/mcp
+npx -y @project-bourne/mcp@0.6.0
 ~~~
 
 ## Development
@@ -152,7 +152,8 @@ immutable plan; no scientific argv is interpolated into remote shell text.
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne).
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.6.0
+npm package and matching Registry entry are public.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v1,

@@ -8,17 +8,19 @@ exact-execution reconciliation tools while keeping the MCP process local.
 
 ## Install and run
 
-The core remains dependency-free. From a source checkout, install MCP support
-explicitly:
+The core remains dependency-free. Install MCP support explicitly:
+
+```bash
+python -m pip install "bourneprov[mcp]==0.6.0"
+bourne mcp
+```
+
+For v0.7 development from a source checkout, use the committed uv lockfile:
 
 ```bash
 uv sync --locked --all-extras --dev
 uv run --frozen --no-sync bourne mcp
 ```
-
-For the current public release, use
-`python -m pip install "bourneprov[mcp]"`. During v0.7 development and
-release-candidate review, use the locked source-checkout workflow above.
 
 The canonical entrypoint uses stdio only. Protocol frames use stdout; human
 diagnostics, logs, and direct workload output use stderr. Set
@@ -29,9 +31,9 @@ logged.
 The public npm launcher provides the matching released server:
 
 ```bash
-npx -y @project-bourne/mcp
-npx -y @project-bourne/mcp --doctor
-npx -y @project-bourne/mcp --no-bootstrap
+npx -y @project-bourne/mcp@0.6.0
+npx -y @project-bourne/mcp@0.6.0 --doctor
+npx -y @project-bourne/mcp@0.6.0 --no-bootstrap
 ```
 
 It requires Node.js 22+. It first locates Python 3.10+ with the exact compatible
@@ -60,9 +62,8 @@ the npm package `@project-bourne/mcp`. Its name must equal the package's
 `mcpName`; deterministic repository tests enforce that identity and version
 coupling. No HTTP or hosted transport is advertised.
 
-The release-candidate npm package and Registry entry are not public yet. Final
-Registry publication must occur only after the matching final npm version is
-available and its `mcpName` has been verified.
+The v0.6.0 npm package and Registry entry are public. Their package, version,
+`mcpName`, and stdio transport identities match.
 
 ## Generic host configuration
 
