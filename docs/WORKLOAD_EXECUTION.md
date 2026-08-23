@@ -1,8 +1,11 @@
 # Workload Planning and Scheduler Execution
 
-Project Bourne v0.4.0 provides a framework-independent path from an observed
+Project Bourne v0.4.0 introduced a framework-independent path from an observed
 compute-site inventory to an actual, provenance-bearing scientific experiment.
-This document describes the v0.4.0 implementation.
+v0.7 extends that foundation with durable sites, resource shapes, bounded
+constraint candidates, explicit selection, existing-environment activation,
+and typed remote scheduler execution. The full extension is documented in
+[Site-aware planning](SITE_AWARE_PLANNING.md).
 
 ## Durable model
 
@@ -151,12 +154,20 @@ future SDK/MCP boundary.
 ## Current limitations
 
 - Scheduler compute allocations must have Python 3.
-- The access target and compute allocation must both see the staging directory;
-  visibility is unknown until the worker runs.
+- Local scheduler execution still requires the access target and compute
+  allocation to share the staging directory. Site-aware SSH execution stages
+  bounded artifacts to the configured user-space remote project root and still
+  requires that root to be visible inside the allocation.
 - The scientific working directory and explicitly declared paths are not
-  copied; sites without shared storage need a future explicit staging adapter.
-- There is no automatic dependency installation, module loading, launcher
-  injection, container orchestration, SSH execution, retry, or policy inference.
+  copied wholesale. A declared safe workload variant is staged separately, but
+  arbitrary project/data synchronization is not implemented.
+- v0.7 supports typed activation of already-existing modules, Conda
+  environments, and virtual environments. It does not install dependencies,
+  build environments, inject launchers, orchestrate containers, or infer site
+  policy.
+- Remote SSH execution is scheduler-mediated only. There is no disconnect-safe
+  direct remote execution, arbitrary remote shell, blind submission retry, or
+  generic remote file browser.
 - Scheduler state parsing targets common Slurm/PBS interfaces and needs
   additional real-site validation across vendor variants.
 - Slurm accounting is optional and may be unavailable or delayed by site

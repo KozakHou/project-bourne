@@ -17,7 +17,7 @@ from .models import (
     SystemProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 _SCHEMA_V1 = (
     """
@@ -490,6 +490,111 @@ _MIGRATION_4_TO_5 = (
     """,
 )
 
+_MIGRATION_5_TO_6 = (
+    """
+    CREATE TABLE sites (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('local', 'remote_ssh')),
+        created_at TEXT NOT NULL,
+        site_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX sites_kind_name ON sites (kind, name)
+    """,
+    """
+    CREATE TABLE site_policy_claims (
+        id TEXT PRIMARY KEY,
+        site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+        subject TEXT NOT NULL,
+        property TEXT NOT NULL,
+        evidence_kind TEXT NOT NULL CHECK (evidence_kind IN (
+            'observed_now', 'site_declared', 'user_declared',
+            'historical', 'inferred', 'unknown'
+        )),
+        interpretation_status TEXT NOT NULL CHECK (interpretation_status IN (
+            'hard_constraint', 'advisory', 'unresolved'
+        )),
+        created_at TEXT NOT NULL,
+        claim_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX site_policy_claims_site_property
+    ON site_policy_claims (site_id, subject, property, created_at, id)
+    """,
+    """
+    CREATE TABLE inventory_site_links (
+        snapshot_id TEXT PRIMARY KEY
+            REFERENCES inventory_snapshots(id) ON DELETE CASCADE,
+        site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+        relationship TEXT NOT NULL CHECK (relationship = 'observed_at')
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX inventory_site_links_site
+    ON inventory_site_links (site_id, snapshot_id)
+    """,
+    """
+    CREATE TABLE candidate_selection_summaries (
+        id TEXT PRIMARY KEY,
+        workload_id TEXT NOT NULL
+            REFERENCES workload_specs(id) ON DELETE RESTRICT,
+        site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        generated_count INTEGER NOT NULL CHECK (generated_count >= 0),
+        hard_invalid_count INTEGER NOT NULL CHECK (hard_invalid_count >= 0),
+        viable_count INTEGER NOT NULL CHECK (viable_count >= 0),
+        truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+        summary_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX candidate_selection_workload
+    ON candidate_selection_summaries (workload_id, created_at, id)
+    """,
+    """
+    CREATE TABLE workload_variants (
+        id TEXT PRIMARY KEY,
+        workload_id TEXT NOT NULL
+            REFERENCES workload_specs(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        original_sha256 TEXT NOT NULL,
+        derived_sha256 TEXT NOT NULL,
+        variant_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX workload_variants_workload
+    ON workload_variants (workload_id, created_at, id)
+    """,
+    """
+    CREATE TABLE execution_plan_site_links (
+        plan_id TEXT PRIMARY KEY
+            REFERENCES execution_plans(id) ON DELETE CASCADE,
+        site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+        selection_summary_id TEXT
+            REFERENCES candidate_selection_summaries(id) ON DELETE RESTRICT,
+        workload_variant_id TEXT
+            REFERENCES workload_variants(id) ON DELETE RESTRICT
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE remote_execution_states (
+        execution_id TEXT PRIMARY KEY
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+        state TEXT NOT NULL,
+        remote_staging_directory TEXT,
+        scheduler_family TEXT,
+        scheduler_job_id TEXT,
+        observed_at TEXT NOT NULL,
+        evidence_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+)
+
 
 class ExperimentNotFound(LookupError):
     pass
@@ -571,6 +676,11 @@ class ExperimentStore:
                     for statement in _MIGRATION_4_TO_5:
                         connection.execute(statement)
                     connection.execute("PRAGMA user_version = 5")
+                    version = 5
+                if version == 5:
+                    for statement in _MIGRATION_5_TO_6:
+                        connection.execute(statement)
+                    connection.execute("PRAGMA user_version = 6")
         except sqlite3.Error as exc:
             raise DatabaseMigrationError(f"could not migrate Bourne database: {exc}") from exc
 

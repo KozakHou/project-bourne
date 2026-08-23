@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,9 +33,15 @@ TOOLS = [
     "bourne_validate_request",
     "bourne_discover",
     "bourne_inventory",
+    "bourne_site_list",
+    "bourne_site_inspect",
+    "bourne_site_discover",
+    "bourne_site_candidates",
+    "bourne_site_select",
     "bourne_plan",
     "bourne_execute_plan",
     "bourne_execution_get",
+    "bourne_execution_reconcile",
     "bourne_execution_wait",
     "bourne_execution_cancel",
     "bourne_trace_artifact",
@@ -60,6 +67,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
             async with Client(server) as client:
                 listed = await client.list_tools()
+                response = await client.call_tool("bourne_request_schema", {})
 
         self.assertEqual([tool.name for tool in listed.tools], TOOLS)
         by_name = {tool.name: tool for tool in listed.tools}
@@ -76,13 +84,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_name["bourne_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execute_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execution_cancel"].annotations.destructive_hint)
-
-        with tempfile.TemporaryDirectory() as directory:
-            server = create_mcp_server(
-                BourneAgentService(Path(directory) / "bourne.sqlite3")
-            )
-            async with Client(server) as client:
-                response = await client.call_tool("bourne_request_schema", {})
+        self.assertNotIn("shell", " ".join(by_name))
         self.assertEqual(
             response.structured_content["data"]["schema"],
             execution_request_schema(),
@@ -202,6 +204,78 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unknown_plan.structured_content["error"]["code"], "unknown_plan")
         self.assertTrue(all(item.structured_content["ok"] for item in reads))
         self.assertTrue(all(item.structured_content["ok"] for item in mutations))
+
+    async def test_site_candidate_selection_tools_use_structured_core_services(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            agent = BourneAgentService(database, cwd=root)
+            site = agent.site_service.add_site(
+                "fixture-hpc", scheduler_hint="slurm",
+                local_project_root=str(root),
+            )
+            snapshot = inventory_snapshot(
+                root, scheduler_families=("slurm",),
+                executable=Path(sys.executable).name,
+            )
+            target = replace(
+                snapshot.execution_targets[0],
+                authorization="observed-authorized",
+                metadata={
+                    **snapshot.execution_targets[0].metadata,
+                    "resource_shapes": [
+                        {
+                            "nodes": 1,
+                            "cpus_per_node": 4,
+                            "total_cpus": 4,
+                            "scheduler_class": snapshot.execution_targets[0].name,
+                        }
+                    ],
+                },
+            )
+            snapshot = replace(
+                snapshot,
+                site_label=site.name,
+                targets=[snapshot.current_target, target],
+            )
+            InventoryStore(database).save(snapshot)
+            agent.site_service.sites.link_inventory(site.id, snapshot.id)
+            document = execution_request(
+                [sys.executable, "-c", "print('site-plan')"],
+                resources={"nodes": 1, "cpus": 1},
+                execution={"backend": "slurm"},
+            )
+            server = create_mcp_server(agent)
+            async with Client(server) as client:
+                listed = await client.call_tool("bourne_site_list", {})
+                inspected = await client.call_tool(
+                    "bourne_site_inspect", {"reference": site.id}
+                )
+                explored = await client.call_tool(
+                    "bourne_site_candidates",
+                    {"reference": site.id, "request": document},
+                )
+                request_id = explored.structured_content["data"]["request"]["id"]
+                candidate = explored.structured_content["data"]["exploration"]["candidates"][0]
+                selected = await client.call_tool(
+                    "bourne_site_select",
+                    {
+                        "request_id": request_id,
+                        "candidate_id": candidate["id"],
+                        "selection_source": "test-human",
+                        "rationale": "focused MCP contract test",
+                    },
+                )
+                unknown = await client.call_tool(
+                    "bourne_execution_reconcile",
+                    {"reference": "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+                )
+
+        self.assertEqual(listed.structured_content["data"]["sites"][0]["id"], site.id)
+        self.assertEqual(inspected.structured_content["data"]["site"]["name"], "fixture-hpc")
+        self.assertEqual(candidate["state"], "viable")
+        self.assertEqual(selected.structured_content["data"]["plan"]["site_id"], site.id)
+        self.assertEqual(unknown.structured_content["error"]["code"], "unknown_execution")
 
     async def test_real_stdio_negotiates_current_protocol_and_keeps_stdout_pure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

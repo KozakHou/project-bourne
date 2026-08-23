@@ -22,8 +22,8 @@ scientific correctness.
 
 ## MCP connection
 
-An MCP-capable host connects to the local stdio server through `bourne mcp` or,
-after v0.6 publication, `npx -y @project-bourne/mcp`. The canonical Registry
+An MCP-capable host connects to the local stdio server through `bourne mcp` or
+`npx -y @project-bourne/mcp`. The canonical Registry
 identity is `io.github.KozakHou/project-bourne`. MCP translates structured tool
 calls into the same Bourne Core services used by the CLI; it does not replace
 the resolver, scheduler backends, provenance store, or authorization boundary.
@@ -34,13 +34,18 @@ the resolver, scheduler backends, provenance store, or authorization boundary.
 2. Validate it without side effects.
 3. Read an existing inventory. Run discovery only when a current snapshot is
    explicitly appropriate.
-4. Plan and inspect all compatibility evidence.
-5. Preserve ambiguity and unknown infrastructure facts; ask for a concrete
-   choice when needed.
-6. Execute only after execution intent is established.
-7. Return the Bourne execution ID and report process state, verification, and
+4. For site-aware work, inspect the configured non-secret site, inventory,
+   evidence, policy claims, resource shapes, and existing environments.
+5. Generate bounded candidates and inspect every acceptance, rejection,
+   unknown, coverage, and truncation fact.
+6. Preserve ambiguity and unknown infrastructure facts; ask for a concrete
+   candidate choice and record the selection source/rationale when needed.
+7. Execute only the selected immutable plan after execution intent is established.
+8. If a remote submission response is ambiguous, reconcile the same execution
+   identity. Never create a replacement execution or resubmit blindly.
+9. Return the Bourne execution ID and report process state, verification, and
    telemetry separately.
-8. Use artifact tracing for provenance and lineage questions.
+10. Use artifact tracing for provenance and lineage questions.
 
 Example intent:
 
@@ -66,6 +71,13 @@ Keep command arguments as an exact argv array. Do not expand `$HOME`, evaluate
 quotes, substitutions, pipes, or semicolons, or turn the request into a shell
 command. Do not add resources, outputs, lineage, telemetry, or checks that the
 user did not request.
+
+Keep AI, MCP, API credentials, and agent loops on the local control machine.
+The HPC path is the existing OpenSSH configuration, a typed one-shot non-AI
+worker on the access node, the existing Slurm/PBS scheduler, and the
+execution-scoped compute worker. Never request a generic remote shell, weaken
+OpenSSH host-key verification, install or build an environment remotely, or
+treat visible infrastructure as proof of authorization.
 
 Do not bypass an unresolved Bourne plan by manually writing `sbatch`, `qsub`,
 or another scheduler command. Doing so would bypass deterministic resolution,

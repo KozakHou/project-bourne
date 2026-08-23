@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from .planning_models import ResolvedEnvironment, ResourceShape
+
 EvidenceState = Literal["explicit", "observed", "inferred", "historical", "unknown"]
 BackendName = Literal["direct", "slurm", "pbs"]
 CompatibilityState = Literal["compatible", "partial", "incompatible", "unknown"]
@@ -215,6 +217,12 @@ class ExecutionPlan:
     unresolved_conditions: list[str]
     decision_evidence: list[DecisionEvidence]
     created_at: str
+    site_id: str | None = None
+    resource_shape: ResourceShape | None = None
+    environment: ResolvedEnvironment | None = None
+    workload_variant_id: str | None = None
+    selection_summary_id: str | None = None
+    policy_basis: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.backend not in _BACKENDS:
@@ -236,7 +244,14 @@ class ExecutionPlan:
         return [self.executable, *self.arguments]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value["resource_shape"] = (
+            None if self.resource_shape is None else self.resource_shape.to_dict()
+        )
+        value["environment"] = (
+            None if self.environment is None else self.environment.to_dict()
+        )
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ExecutionPlan":
@@ -259,6 +274,20 @@ class ExecutionPlan:
                 DecisionEvidence(**item) for item in value["decision_evidence"]
             ],
             created_at=value["created_at"],
+            site_id=value.get("site_id"),
+            resource_shape=(
+                None
+                if value.get("resource_shape") is None
+                else ResourceShape.from_dict(value["resource_shape"])
+            ),
+            environment=(
+                None
+                if value.get("environment") is None
+                else ResolvedEnvironment.from_dict(value["environment"])
+            ),
+            workload_variant_id=value.get("workload_variant_id"),
+            selection_summary_id=value.get("selection_summary_id"),
+            policy_basis=list(value.get("policy_basis", [])),
         )
 
 

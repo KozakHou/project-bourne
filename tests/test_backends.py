@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.ids import new_ulid
 from bourneprov.identity import ProcessIdentity, current_process_identity
 from bourneprov.inventory_storage import InventoryStore
+from bourneprov.planning_models import ResourceShape
 from bourneprov.resolver import resolve_execution
 from bourneprov.workload import inspect_workload, utc_now
 from bourneprov.workload_models import ExecutionAttempt, ExecutionConstraints, ResourceRequirements
@@ -66,6 +68,40 @@ class BackendTests(unittest.TestCase):
         self.assertIn("python3", script)
         self.assertIn("'/shared/worker with space.pyz'", script)
         self.assertNotIn("shell=True", script)
+
+    def test_resource_shapes_keep_total_and_per_task_per_node_semantics_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _store, snapshot, _workload, plan, execution = self._execution(root, "slurm")
+            shaped = replace(
+                plan,
+                resource_shape=ResourceShape(
+                    nodes=2, cpus_per_node=4, total_cpus=8,
+                    mpi_ranks=8, ranks_per_node=4, threads_per_rank=1,
+                    gpus=4, gpus_per_node=2,
+                    memory_bytes=2 * 1024**3,
+                    memory_per_node_bytes=1024**3,
+                ),
+            )
+            slurm = render_batch_script(
+                "slurm", shaped, Path("worker"), Path("plan"), Path("result"),
+                execution.id, target_name=snapshot.execution_targets[0].name,
+            )
+            pbs = render_batch_script(
+                "pbs", shaped, Path("worker"), Path("plan"), Path("result"),
+                execution.id, target_name="queue",
+            )
+
+        self.assertIn("#SBATCH --nodes=2", slurm)
+        self.assertIn("#SBATCH --ntasks=8", slurm)
+        self.assertIn("#SBATCH --ntasks-per-node=4", slurm)
+        self.assertIn("#SBATCH --cpus-per-task=1", slurm)
+        self.assertNotIn("#SBATCH --cpus-per-task=8", slurm)
+        self.assertIn("#SBATCH --gpus-per-node=2", slurm)
+        self.assertIn(
+            "#PBS -l select=2:ncpus=4:ngpus=2:mem=1024mb:mpiprocs=4:ompthreads=1",
+            pbs,
+        )
 
     def test_unsafe_scheduler_target_name_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -262,6 +298,8 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(pbs._parse_status(command_result([], stdout="    job_state = Q\n")), "queued")
             self.assertEqual(pbs._parse_status(command_result([], stdout="    job_state = R\n")), "running")
             self.assertEqual(pbs._parse_status(command_result([], stdout="    job_state = F\n")), "finished")
+            with self.assertRaisesRegex(BackendError, "invalid job ID"):
+                pbs._parse_submission("-W force\n")
 
     def test_pbs_cancellation_uses_only_recorded_job_id_and_persists_intent(self) -> None:
         calls: list[list[str]] = []

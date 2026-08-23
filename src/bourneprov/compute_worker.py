@@ -6,13 +6,14 @@ import json
 import os
 import platform
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, TextIO
 
 from .artifacts import capture_artifacts
 from .collectors.system import collect_system
-from .collectors.execution_context import resolve_executable
 from .ids import new_ulid
 from .execution_outcomes import build_telemetry_summary, evaluate_verification
 from .execution_request import ExecutionRequest
@@ -64,7 +65,7 @@ def execute_plan(
     stderr_stream: TextIO | None = None,
 ) -> WorkerResult:
     allocation = _observe_allocation(execution_id, direct=plan.backend == "direct")
-    problems, preflight = _preflight(plan, allocation)
+    problems, preflight, environment = _preflight(plan, allocation)
     if problems:
         return WorkerResult(
             execution_id=execution_id, state="preflight_failed", created_at=utc_now(),
@@ -83,6 +84,7 @@ def execute_plan(
         stdout_stream=sys.stdout if stdout_stream is None else stdout_stream,
         stderr_stream=sys.stderr if stderr_stream is None else stderr_stream,
         experiment_id=experiment_id,
+        environment=environment,
     )
     outputs = capture_artifacts(experiment_id, "output", list(plan.outputs), cwd)
     lineage = (
@@ -128,7 +130,7 @@ def _load_plan(
     if path.stat().st_size > MAX_PLAN_BYTES:
         raise ValueError("staged plan exceeds the size limit")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2, 3}:
         raise ValueError("unsupported staged plan")
     if value.get("execution_id") != execution_id:
         raise ValueError("staged plan execution ID does not match")
@@ -140,7 +142,7 @@ def _load_plan(
     plan = ExecutionPlan.from_dict(plan_value)
     workload = WorkloadSpec.from_dict(workload_value)
     request_value = value.get("request")
-    if value["schema_version"] == 2:
+    if value["schema_version"] in {2, 3}:
         if not isinstance(request_value, dict):
             raise ValueError("version-2 staged plan requires an execution request")
         request = ExecutionRequest.from_dict(request_value)
@@ -233,21 +235,41 @@ def _observe_allocation(
 def _preflight(
     plan: ExecutionPlan,
     allocation: AllocationObservation,
-) -> tuple[list[str], dict[str, Any]]:
+) -> tuple[list[str], dict[str, Any], dict[str, str]]:
     problems: list[str] = []
+    environment, activation_evidence, activation_problem = _activation_environment(plan)
+    if activation_problem is not None:
+        problems.append(activation_problem)
     cwd = Path(plan.working_directory)
     try:
         cwd_ok = cwd.is_dir()
     except OSError:
         cwd_ok = False
-    resolved = resolve_executable(plan.executable, cwd) if cwd_ok else None
+    resolved = (
+        _resolve_with_environment(plan.executable, cwd, environment)
+        if cwd_ok and activation_problem is None
+        else None
+    )
     if not cwd_ok:
         problems.append("working directory is unavailable on the execution host")
     elif resolved is None:
         problems.append("requested executable is unavailable on the execution host")
     requested = plan.requested_resources
+    if plan.resource_shape is not None:
+        shape = plan.resource_shape
+        requested_values = {
+            "nodes": shape.nodes,
+            "cpus": shape.total_cpus,
+            "gpus": shape.gpus,
+            "mpi_ranks": shape.mpi_ranks,
+        }
+    else:
+        requested_values = {
+            name: getattr(requested, name)
+            for name in ("nodes", "cpus", "gpus", "mpi_ranks")
+        }
     for name in ("nodes", "cpus", "gpus", "mpi_ranks"):
-        required = getattr(requested, name)
+        required = requested_values[name]
         observed = allocation.resources.get(name)
         if required is not None and observed is not None and int(observed) < required:
             problems.append(
@@ -257,8 +279,83 @@ def _preflight(
         "observed_at": utc_now(), "working_directory_available": cwd_ok,
         "requested_executable": plan.executable, "resolved_executable": resolved,
         "requested_resources": vars(requested),
+        "selected_resource_shape": (
+            None if plan.resource_shape is None else plan.resource_shape.to_dict()
+        ),
+        "environment_activation": activation_evidence,
         "observed_resources": allocation.resources,
+    }, environment
+
+
+def _activation_environment(
+    plan: ExecutionPlan,
+) -> tuple[dict[str, str], dict[str, Any], str | None]:
+    environment = dict(os.environ)
+    if plan.environment is None:
+        return environment, {"kind": "none", "status": "not_planned"}, None
+    activation = plan.environment.activation
+    evidence: dict[str, Any] = {
+        "kind": activation.kind,
+        "names": list(activation.names),
+        "prefix": activation.prefix,
+        "status": "planned",
     }
+    if activation.kind == "none":
+        evidence["status"] = "reproduced"
+        return environment, evidence, None
+    if activation.kind in {"virtualenv", "conda", "spack"}:
+        prefix = Path(activation.prefix or "")
+        binary = prefix / "bin"
+        if not prefix.is_dir() or not binary.is_dir():
+            evidence["status"] = "failed"
+            return environment, evidence, "planned environment prefix is unavailable"
+        environment["PATH"] = str(binary) + os.pathsep + environment.get("PATH", "")
+        if activation.kind == "virtualenv":
+            environment["VIRTUAL_ENV"] = str(prefix)
+        elif activation.kind == "conda":
+            environment["CONDA_PREFIX"] = str(prefix)
+        else:
+            environment["SPACK_ENV"] = str(prefix)
+        evidence["status"] = "reproduced"
+        return environment, evidence, None
+    shell = shutil.which("sh")
+    if shell is None:
+        evidence["status"] = "failed"
+        return environment, evidence, "module activation requires a POSIX shell"
+    # Fixed Bourne-owned activation template. Scientific argv is never part of it.
+    result = subprocess.run(
+        [
+            shell, "-lc",
+            'module load "$@" >/dev/null 2>&1 && env -0',
+            "bourne-module", *activation.names,
+        ],
+        input=b"", capture_output=True, check=False, timeout=10,
+    )
+    if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
+        evidence["status"] = "failed"
+        return environment, evidence, "planned module environment could not be reproduced"
+    environment = {
+        item.split(b"=", 1)[0].decode("utf-8", "surrogateescape"):
+        item.split(b"=", 1)[1].decode("utf-8", "surrogateescape")
+        for item in result.stdout.split(b"\0")
+        if b"=" in item
+    }
+    evidence["status"] = "reproduced"
+    return environment, evidence, None
+
+
+def _resolve_with_environment(
+    executable: str, cwd: Path, environment: dict[str, str]
+) -> str | None:
+    path = Path(executable)
+    if path.is_absolute() or "/" in executable:
+        candidate = path if path.is_absolute() else cwd / path
+        return (
+            str(candidate.resolve(strict=False))
+            if candidate.is_file() and os.access(candidate, os.X_OK)
+            else None
+        )
+    return shutil.which(executable, path=environment.get("PATH"))
 
 
 def _allocated_gpu_count(raw: dict[str, str]) -> int | None:

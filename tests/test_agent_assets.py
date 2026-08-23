@@ -30,10 +30,38 @@ def skill_frontmatter() -> dict[str, str]:
 class AgentAssetTests(unittest.TestCase):
     def test_python_core_stays_dependency_free_and_mcp_is_optional(self) -> None:
         declared = requires("bourneprov") or []
-        self.assertEqual(version("bourneprov"), "0.6.0")
+        self.assertEqual(version("bourneprov"), "0.7.0.dev0")
         self.assertEqual(len(declared), 1)
         self.assertTrue(declared[0].startswith("mcp<3,>=2.0.0;"))
         self.assertIn('extra == "mcp"', declared[0])
+
+    def test_uv_is_locked_development_tooling_not_runtime(self) -> None:
+        project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        runtime_sources = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8")
+            for path in (
+                "src/bourneprov/remote_worker.py",
+                "src/bourneprov/compute_worker.py",
+                "packages/mcp/src/runtime.ts",
+            )
+        )
+
+        self.assertIn("dependencies = []", project)
+        self.assertIn('build-backend = "setuptools.build_meta"', project)
+        self.assertIn('requires-python = ">=3.10"', lock)
+        self.assertIn('"mcp>=2.0.0,<3"', project)
+        self.assertIn("uv sync --locked", ci)
+        self.assertIn("uv run --frozen --no-sync", ci)
+        self.assertIn("uv build --no-sources", ci)
+        self.assertIn("uv build --no-sources", release)
+        self.assertNotIn(" uv ", f" {runtime_sources.lower()} ")
 
     def test_npm_launcher_has_no_runtime_dependencies_and_exact_version_coupling(self) -> None:
         package = load_json(ROOT / "packages" / "mcp" / "package.json")
@@ -41,11 +69,11 @@ class AgentAssetTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(package["name"], "@project-bourne/mcp")
-        self.assertEqual(package["version"], "0.6.0")
+        self.assertEqual(package["version"], "0.7.0-dev.0")
         self.assertEqual(package["publishConfig"], {"access": "public"})
         self.assertNotIn("dependencies", package)
         self.assertEqual(package["engines"]["node"], ">=22")
-        self.assertIn('PYTHON_VERSION = "0.6.0"', runtime)
+        self.assertIn('PYTHON_VERSION = "0.7.0.dev0"', runtime)
         self.assertIn("shell: false", runtime)
         self.assertNotIn("sbatch", runtime)
         self.assertNotIn("qsub", runtime)

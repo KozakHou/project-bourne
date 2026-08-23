@@ -1,0 +1,65 @@
+{
+  "kind": "bourne.constraint-provider",
+  "schema_version": 1,
+  "name": "generic-mpi-decomposition",
+  "provider_version": "1",
+  "parameters": [
+    {
+      "name": "decomposition_x",
+      "classification": "execution_only",
+      "classification_evidence": {
+        "kind": "provider_contract",
+        "statement": "This reference input defines x only as an MPI layout dimension."
+      },
+      "allowed_values": [1, 2, 4, 8],
+      "binding": {
+        "kind": "json_path",
+        "input": "case.json",
+        "path": ["execution", "decomposition", "x"]
+      }
+    },
+    {
+      "name": "decomposition_y",
+      "classification": "execution_only",
+      "classification_evidence": {
+        "kind": "provider_contract",
+        "statement": "This reference input defines y only as an MPI layout dimension."
+      },
+      "allowed_values": [1, 2, 4, 8],
+      "binding": {
+        "kind": "json_path",
+        "input": "case.json",
+        "path": ["execution", "decomposition", "y"]
+      }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "decomposition-equals-ranks",
+      "operator": "equal",
+      "left": {
+        "multiply": [
+          {"parameter": "decomposition_x"},
+          {"parameter": "decomposition_y"}
+        ]
+      },
+      "right": {"resource": "mpi_ranks"},
+      "hard": true,
+      "message": "MPI ranks must equal decomposition_x × decomposition_y."
+    },
+    {
+      "id": "ranks-divide-total-cpus",
+      "operator": "divisible_by",
+      "left": {"resource": "total_cpus"},
+      "right": {"resource": "mpi_ranks"},
+      "hard": true,
+      "message": "MPI ranks must divide the selected total CPU count."
+    }
+  ],
+  "environment_requirements": [
+    {"kind": "launcher", "name": "mpirun", "required": true}
+  ],
+  "launcher_requirements": [
+    {"kind": "launcher", "name": "mpirun", "required": true}
+  ]
+}

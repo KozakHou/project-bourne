@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from .backends import (
     DEFAULT_SCHEDULER_POLL_SECONDS,
@@ -36,6 +36,7 @@ from .workload_models import (
     WorkloadSpec,
 )
 from .workload_storage import ExecutionStore
+from .site_storage import SiteStore
 
 
 class PlanningError(RuntimeError):
@@ -77,6 +78,7 @@ class ExecutionService:
         inventory_store: InventoryStore,
         *,
         staging_root: Path | None = None,
+        remote_clients: Mapping[str, Any] | None = None,
     ):
         self.store = store
         self.inventory_store = inventory_store
@@ -85,6 +87,8 @@ class ExecutionService:
             if staging_root is not None
             else store.path.parent / "execution-staging"
         )
+        self.site_store = SiteStore(store.path)
+        self.remote_clients = {} if remote_clients is None else dict(remote_clients)
 
     def plan(
         self,
@@ -157,6 +161,12 @@ class ExecutionService:
         if plan.inventory_snapshot_id != inventory.id:
             raise PlanningError("plan inventory does not match the supplied snapshot")
         workload = self.store.get_workload(plan.workload_id)
+        previous = self.store.latest_execution_for_plan(plan.id)
+        if previous is not None and previous.state == "submission_ambiguous":
+            raise PlanningError(
+                f"execution {previous.id} has ambiguous submission truth; reconcile it "
+                "before creating another execution from this plan"
+            )
         now = utc_now()
         identity = current_process_identity()
         execution = ExecutionAttempt(
@@ -169,13 +179,14 @@ class ExecutionService:
         self.store.record_execution_event(
             execution.id, "identity_observed", now, identity.evidence()
         )
-        selected_backend = backend or self.backend(plan.backend)
+        selected_backend = backend or self._backend_for_plan(plan)
         try:
             return selected_backend.execute(execution, plan, workload, inventory)
         except Exception as exc:
             current = self.store.get_execution(execution.id)
             if current.state not in {
-                "failed", "preflight_failed", "completed", "cancelled", "interrupted"
+                "failed", "preflight_failed", "completed", "cancelled", "interrupted",
+                "submission_ambiguous",
             }:
                 self.store.update_execution_state(
                     execution.id, "failed", utc_now(),
@@ -202,10 +213,13 @@ class ExecutionService:
         *,
         poll_seconds: float = DEFAULT_SCHEDULER_POLL_SECONDS,
         timeout_seconds: float | None = None,
-        backend: SchedulerBackend | None = None,
+        backend: Any | None = None,
     ) -> WorkerResult:
         execution = self.store.get_execution(execution_id)
-        selected = backend or self._scheduler_backend(execution.backend)
+        plan = self.store.get_plan(execution.plan_id)
+        selected = backend or self._backend_for_plan(plan)
+        if not hasattr(selected, "wait"):
+            raise PlanningError("direct execution is synchronous")
         return selected.wait(
             execution, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds
         )
@@ -214,21 +228,43 @@ class ExecutionService:
         self,
         execution_id: str,
         *,
-        backend: SchedulerBackend | None = None,
+        backend: Any | None = None,
     ) -> None:
         execution = self.store.get_execution(execution_id)
-        selected = backend or self._scheduler_backend(execution.backend)
+        plan = self.store.get_plan(execution.plan_id)
+        selected = backend or self._backend_for_plan(plan)
+        if not hasattr(selected, "cancel"):
+            raise PlanningError("direct execution is synchronous")
         selected.cancel(execution)
 
     def collect_execution(
         self,
         execution_id: str,
         *,
-        backend: SchedulerBackend | None = None,
+        backend: Any | None = None,
     ) -> WorkerResult:
         execution = self.store.get_execution(execution_id)
-        selected = backend or self._scheduler_backend(execution.backend)
+        plan = self.store.get_plan(execution.plan_id)
+        selected = backend or self._backend_for_plan(plan)
+        if not hasattr(selected, "collect"):
+            raise PlanningError("direct execution is synchronous")
         return selected.collect(execution)
+
+    def _backend_for_plan(self, plan):
+        if plan.site_id is None:
+            return self.backend(plan.backend)
+        site = self.site_store.get(plan.site_id)
+        if site.kind == "local":
+            return self.backend(plan.backend)
+        from .remote_backend import RemoteSchedulerBackend
+        from .remote_transport import OpenSSHTransport, RemoteWorkerClient
+
+        client = self.remote_clients.get(site.id)
+        if client is None:
+            client = RemoteWorkerClient(site, OpenSSHTransport())
+        return RemoteSchedulerBackend(
+            self.store, self.site_store, site, client, self.staging_root
+        )
 
     def _scheduler_backend(self, name: str) -> SchedulerBackend:
         backend = self.backend(name)

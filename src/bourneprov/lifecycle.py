@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Mapping, Sequence, TextIO
 
 from .artifacts import capture_artifacts
 from .collectors import collect_execution_context, collect_git, collect_system
@@ -43,9 +43,13 @@ def _safe_system() -> SystemProvenance:
         )
 
 
-def _safe_execution_context(argv: Sequence[str], cwd: Path) -> ExecutionContext:
+def _safe_execution_context(
+    argv: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str] | None = None,
+) -> ExecutionContext:
     try:
-        return collect_execution_context(argv, cwd)
+        return collect_execution_context(argv, cwd, environment)
     except Exception:  # Execution-context collection must never prevent execution.
         return ExecutionContext(requested_executable=argv[0])
 
@@ -56,6 +60,7 @@ def run_experiment(
     stdout_stream: TextIO | None = None,
     stderr_stream: TextIO | None = None,
     experiment_id: str | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> Experiment:
     """Collect pre-execution provenance and run one experiment."""
 
@@ -67,12 +72,15 @@ def run_experiment(
     # Capture mutable repository and machine state before the experiment can alter it.
     git = _safe_git(execution_directory)
     system = _safe_system()
-    execution_context = _safe_execution_context(argv, execution_directory)
+    execution_context = _safe_execution_context(
+        argv, execution_directory, environment
+    )
     execution = execute_command(
         argv,
         execution_directory,
         stdout_stream=stdout_stream,
         stderr_stream=stderr_stream,
+        environment=environment,
     )
 
     return Experiment(

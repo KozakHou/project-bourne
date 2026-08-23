@@ -44,6 +44,9 @@ from .workload_references import (
     resolve_plan,
 )
 from .workload_storage import ExecutionStore
+from .constraint_providers import DeclarativeConstraintProvider
+from .site_service import SitePlanningService, SiteService
+from .site_storage import SiteNotFound, SiteStore
 
 
 def _memory_bytes(value: str) -> int:
@@ -99,6 +102,10 @@ def _add_planning_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", action="append", default=[], metavar="PATH")
     parser.add_argument("--derived-from", metavar="EXPERIMENT")
     parser.add_argument("--json", action="store_true", help="write structured JSON")
+    parser.add_argument("--site", help="configured local or remote site name")
+    parser.add_argument("--provider", metavar="FILE", help="declarative constraint-provider JSON")
+    parser.add_argument("--candidate", help="explicit candidate identity to select")
+    parser.add_argument("--selection-rationale", help="human/agent rationale (not evidence)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -112,6 +119,26 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "mcp", help="run the optional Project Bourne MCP server over stdio"
     )
+
+    site_parser = subparsers.add_parser(
+        "site", help="configure non-secret local/SSH execution contexts"
+    )
+    site_subparsers = site_parser.add_subparsers(dest="site_command", required=True)
+    site_add = site_subparsers.add_parser("add", help="add one site")
+    site_add.add_argument("name")
+    site_add.add_argument("--ssh", dest="ssh_host", metavar="HOST")
+    site_add.add_argument("--user", dest="ssh_username")
+    site_add.add_argument("--port", dest="ssh_port", type=_positive)
+    site_add.add_argument("--scheduler", choices=("auto", "slurm", "pbs", "none"))
+    site_add.add_argument("--local-root")
+    site_add.add_argument("--remote-root")
+    site_add.add_argument("--worker", dest="remote_worker_path")
+    site_subparsers.add_parser("list", help="list configured sites").add_argument(
+        "--json", action="store_true"
+    )
+    site_show = site_subparsers.add_parser("show", help="show one configured site")
+    site_show.add_argument("reference")
+    site_show.add_argument("--json", action="store_true")
 
     run_parser = subparsers.add_parser("run", help="run and record an arbitrary command")
     run_parser.add_argument(
@@ -161,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument(
         "--json", action="store_true", help="write structured JSON"
     )
+    discover_parser.add_argument("--site", help="configured site name")
 
     inventory_parser = subparsers.add_parser(
         "inventory", help="inspect a persisted compute-site inventory"
@@ -242,8 +270,15 @@ def _get(store: ExperimentStore, reference: str):
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    if raw_arguments[:1] == ["_remote"]:
+        # Hidden, typed compatibility entry point for a pre-existing Bourne
+        # console script on an SSH site. It is not a generic remote command.
+        from .remote_worker import main as remote_worker_main
+
+        return remote_worker_main(raw_arguments)
     parser = build_parser()
-    arguments = parser.parse_args(argv)
+    arguments = parser.parse_args(raw_arguments)
 
     if arguments.subcommand == "mcp":
         try:
@@ -263,6 +298,52 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = ExperimentStore(default_database_path())
     inventory_store = InventoryStore(default_database_path())
     execution_store = ExecutionStore(default_database_path())
+
+    if arguments.subcommand == "site":
+        service = SiteService(default_database_path())
+        if arguments.site_command == "add":
+            try:
+                site = service.add_site(
+                    arguments.name, ssh_host=arguments.ssh_host,
+                    ssh_username=arguments.ssh_username,
+                    ssh_port=arguments.ssh_port,
+                    scheduler_hint=arguments.scheduler,
+                    local_project_root=arguments.local_root,
+                    remote_project_root=arguments.remote_root,
+                    remote_worker_path=arguments.remote_worker_path,
+                )
+            except (ValueError, OSError) as exc:
+                print(f"bourne: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps(site.to_dict(), sort_keys=True))
+            return 0
+        if arguments.site_command == "list":
+            sites = service.sites.list()
+            if arguments.json:
+                print(json.dumps([item.to_dict() for item in sites], sort_keys=True))
+            else:
+                print("SITE\tKIND\tSSH\tSCHEDULER")
+                for site in sites:
+                    print(
+                        f"{site.name}\t{site.kind}\t{site.ssh_host or '-'}\t"
+                        f"{site.scheduler_hint or 'unknown'}"
+                    )
+            return 0
+        try:
+            site = service.sites.get(arguments.reference)
+        except SiteNotFound:
+            print(f"bourne: no configured site matches '{arguments.reference}'", file=sys.stderr)
+            return 2
+        if arguments.json:
+            print(json.dumps(site.to_dict(), sort_keys=True))
+        else:
+            print(
+                f"Site: {site.name}\nKind: {site.kind}\n"
+                f"SSH: {site.ssh_destination if site.kind == 'remote_ssh' else 'not used'}\n"
+                f"Scheduler: {site.scheduler_hint or 'unknown'}\n"
+                f"Remote root: {site.remote_project_root or 'not configured'}"
+            )
+        return 0
 
     if arguments.subcommand == "request":
         command_name = arguments.request_command
@@ -373,7 +454,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if arguments.subcommand == "discover":
-        snapshot = discover_site(inventory_store, cwd=Path.cwd())
+        try:
+            snapshot = (
+                discover_site(inventory_store, cwd=Path.cwd())
+                if arguments.site is None
+                else SiteService(default_database_path()).discover(
+                    arguments.site, cwd=Path.cwd()
+                )
+            )
+        except (RuntimeError, ValueError, OSError, SiteNotFound) as exc:
+            print(f"bourne: {exc}", file=sys.stderr)
+            return 2
         if arguments.json:
             print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
         else:
@@ -416,12 +507,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if arguments.subcommand in {"plan", "execute"}:
         service = ExecutionService(execution_store, inventory_store)
+        if arguments.site is None and any(
+            value is not None
+            for value in (
+                arguments.provider,
+                arguments.candidate,
+                arguments.selection_rationale,
+            )
+        ):
+            parser.error("--provider, --candidate, and --selection-rationale require --site")
         if (
             arguments.subcommand == "execute"
             and arguments.plan is not None
             and arguments.request is not None
         ):
             parser.error("--plan cannot be combined with --request")
+        if (
+            arguments.subcommand == "execute"
+            and arguments.plan is not None
+            and arguments.site is not None
+        ):
+            parser.error("--site cannot be combined with an existing immutable --plan")
         if arguments.request is not None and _request_conflicts(arguments):
             parser.error(
                 "--request cannot be combined with command, artifact, resource, "
@@ -434,8 +540,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         try:
-            snapshot = resolve_inventory(inventory_store, arguments.snapshot)
-        except InventoryReferenceError as exc:
+            if arguments.site is not None and arguments.snapshot == "latest":
+                site = SiteStore(default_database_path()).get(arguments.site)
+                site_inventories = SiteStore(default_database_path()).inventory_ids(site.id, 1)
+                if not site_inventories:
+                    raise InventoryReferenceError(
+                        f"No inventory is recorded for site '{site.name}'."
+                    )
+                snapshot = inventory_store.get(site_inventories[0])
+            else:
+                snapshot = resolve_inventory(inventory_store, arguments.snapshot)
+        except (InventoryReferenceError, SiteNotFound) as exc:
             print(f"bourne: {exc}", file=sys.stderr)
             return 2
 
@@ -487,6 +602,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                     parent_experiment_id=arguments.derived_from,
                 )
             except ExecutionRequestError as exc:
+                print(f"bourne: {exc}", file=sys.stderr)
+                return 2
+        if arguments.site is not None:
+            try:
+                provider = (
+                    None
+                    if arguments.provider is None
+                    else DeclarativeConstraintProvider.load(Path(arguments.provider))
+                )
+                site_planner = SitePlanningService(default_database_path())
+                session = site_planner.explore_request(
+                    request, arguments.site, snapshot, provider=provider
+                )
+                viable = [
+                    item for item in session.exploration.candidates
+                    if item.state == "viable"
+                ]
+                candidate_id = arguments.candidate
+                if candidate_id is None and len(viable) == 1:
+                    candidate_id = viable[0].id
+                if candidate_id is None:
+                    value = session.to_dict()
+                    print(
+                        json.dumps(value, ensure_ascii=False, sort_keys=True)
+                        if arguments.json
+                        else _format_site_candidates(value)
+                    )
+                    return 2
+                plan = site_planner.select(
+                    session, candidate_id, selection_source="cli",
+                    selection_rationale=arguments.selection_rationale,
+                )
+                if arguments.subcommand == "plan":
+                    print(
+                        json.dumps(plan.to_dict(), ensure_ascii=False, sort_keys=True)
+                        if arguments.json
+                        else f"Plan: {plan.id}\nSite: {arguments.site}\nCandidate: {candidate_id}"
+                    )
+                    return 0
+                result = service.execute_plan(plan.id, snapshot)
+                return _print_execution_result(
+                    result, arguments.json, execution_store
+                )
+            except (BackendError, PlanningError, RuntimeError, ValueError, OSError) as exc:
                 print(f"bourne: {exc}", file=sys.stderr)
                 return 2
         try:
@@ -675,3 +834,22 @@ def _format_request(
             f"  Verification: {checks or 'not requested'}",
         )
     )
+
+
+def _format_site_candidates(value: dict[str, object]) -> str:
+    exploration = value["exploration"]
+    assert isinstance(exploration, dict)
+    lines = [
+        "Site-aware planning candidates",
+        f"  Generated: {exploration['generated_count']}",
+        f"  Viable: {exploration['viable_count']}",
+        f"  Hard invalid: {exploration['hard_invalid_count']}",
+        f"  Coverage: {exploration['coverage']}",
+    ]
+    for candidate in exploration["candidates"]:
+        lines.append(
+            f"  {candidate['id']}  {candidate['state']}  "
+            f"{json.dumps(candidate['resource_shape'], sort_keys=True)}"
+        )
+    lines.append("Select one viable candidate with --candidate <identity>.")
+    return "\n".join(lines)
