@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict
 import itertools
+import math
 import re
 from typing import Any, Iterable, Sequence
 
@@ -149,14 +150,14 @@ def _generated_target_shapes(
     metadata = target.metadata
     scheduler = metadata["scheduler"]
     requested = workload.resources
-    node_values = _dimension_values(requested.nodes, hints.get("nodes"), (1,))
     rank_values: tuple[int | None, ...] = _optional_dimension_values(
         requested.mpi_ranks, hints.get("mpi_ranks")
     )
     hinted_cpus = hints.get("total_cpus")
     generated: list[ResourceShape] = []
     capacity = _target_capacity(metadata, scheduler)
-    for nodes, mpi_ranks in itertools.product(node_values, rank_values):
+    max_nodes = _applicable_hard_max_nodes(target, policy_claims)
+    for mpi_ranks in rank_values:
         if requested.cpus is not None:
             cpu_values = (requested.cpus,)
         elif hinted_cpus:
@@ -164,56 +165,172 @@ def _generated_target_shapes(
         elif mpi_ranks is not None:
             cpu_values = (mpi_ranks,)
         else:
-            cpu_values = (nodes,)
-        for total_cpus in cpu_values:
-            if total_cpus % nodes or (mpi_ranks is not None and mpi_ranks % nodes):
-                continue
-            if mpi_ranks is not None and total_cpus % mpi_ranks:
-                continue
-            gpus = requested.gpus
-            if gpus is not None and gpus % nodes:
-                continue
-            memory = requested.memory_bytes
-            if memory is not None and memory % nodes:
-                continue
-            shape = ResourceShape(
-                nodes=nodes,
-                cpus_per_node=total_cpus // nodes,
-                total_cpus=total_cpus,
+            cpu_values = (None,)
+        for provisional_cpus in cpu_values:
+            node_values = _derived_node_values(
+                requested_nodes=requested.nodes,
+                hinted_nodes=hints.get("nodes"),
+                total_cpus=provisional_cpus,
                 mpi_ranks=mpi_ranks,
-                ranks_per_node=None if mpi_ranks is None else mpi_ranks // nodes,
-                threads_per_rank=(
-                    None if mpi_ranks is None else total_cpus // mpi_ranks
-                ),
-                gpus=gpus,
-                gpus_per_node=None if gpus is None else gpus // nodes,
-                memory_bytes=memory,
-                memory_per_node_bytes=None if memory is None else memory // nodes,
-                architecture=_bounded_metadata_string(metadata.get("architecture")),
-                node_class=_bounded_metadata_string(metadata.get("node_class")),
-                walltime_seconds=requested.walltime_seconds,
-                scheduler_class=target.name,
-                placement={
+                gpus=requested.gpus,
+                memory_bytes=requested.memory_bytes,
+                capacity=capacity,
+                hard_max_nodes=max_nodes,
+                limit=limit,
+            )
+            for nodes in node_values:
+                total_cpus = nodes if provisional_cpus is None else provisional_cpus
+                if total_cpus % nodes or (mpi_ranks is not None and mpi_ranks % nodes):
+                    continue
+                if mpi_ranks is not None and total_cpus % mpi_ranks:
+                    continue
+                gpus = requested.gpus
+                if gpus is not None and gpus % nodes:
+                    continue
+                memory = requested.memory_bytes
+                if memory is not None and memory % nodes:
+                    continue
+                shape = ResourceShape(
+                    nodes=nodes,
+                    cpus_per_node=total_cpus // nodes,
+                    total_cpus=total_cpus,
+                    mpi_ranks=mpi_ranks,
+                    ranks_per_node=None if mpi_ranks is None else mpi_ranks // nodes,
+                    threads_per_rank=(
+                        None if mpi_ranks is None else total_cpus // mpi_ranks
+                    ),
+                    gpus=gpus,
+                    gpus_per_node=None if gpus is None else gpus // nodes,
+                    memory_bytes=memory,
+                    memory_per_node_bytes=None if memory is None else memory // nodes,
+                    architecture=_bounded_metadata_string(metadata.get("architecture")),
+                    node_class=_bounded_metadata_string(metadata.get("node_class")),
+                    walltime_seconds=requested.walltime_seconds,
+                    scheduler_class=target.name,
+                    placement=_target_placement(target, scheduler),
+                    evidence=[],
+                )
+                if not _within_observed_capacity(shape, capacity):
+                    continue
+                capacity_evidence = {
+                    "kind": "observed_now",
+                    "scope": "scheduler_target_capacity",
                     "target_id": target.id,
-                    "scheduler": scheduler,
-                },
-                evidence=[],
-            )
-            if not _within_observed_capacity(shape, capacity):
-                continue
-            capacity_evidence = {
-                "kind": "observed_now",
-                "scope": "scheduler_target_capacity",
-                "target_id": target.id,
-                "capacity": capacity,
-            }
-            shape = ResourceShape.from_dict(
-                {**shape.to_dict(), "evidence": [capacity_evidence]}
-            )
-            generated.append(_shape_with_target_evidence(shape, target, policy_claims))
-            if len(generated) == limit:
-                return generated
+                    "capacity": capacity,
+                }
+                shape = ResourceShape.from_dict(
+                    {**shape.to_dict(), "evidence": [capacity_evidence]}
+                )
+                generated.append(
+                    _shape_with_target_evidence(shape, target, policy_claims)
+                )
+                if len(generated) == limit:
+                    return generated
     return generated
+
+
+def _derived_node_values(
+    *,
+    requested_nodes: int | None,
+    hinted_nodes: tuple[int, ...] | None,
+    total_cpus: int | None,
+    mpi_ranks: int | None,
+    gpus: int | None,
+    memory_bytes: int | None,
+    capacity: dict[str, int],
+    hard_max_nodes: int | None,
+    limit: int,
+) -> tuple[int, ...]:
+    """Derive exact, capacity-feasible allocation widths without guessing access."""
+
+    # Explicit request intent is authoritative. Policy evaluation can reject it,
+    # but generation must not silently replace it with automatic alternatives.
+    if requested_nodes is not None:
+        return (requested_nodes,)
+    if hinted_nodes:
+        return tuple(
+            value
+            for value in sorted(set(hinted_nodes))
+            if hard_max_nodes is None or value <= hard_max_nodes
+        )[:limit]
+
+    per_node_bounds = [
+        (total_cpus, capacity.get("cpus_per_node")),
+        (gpus, capacity.get("gpus_per_node")),
+        (memory_bytes, capacity.get("memory_per_node_bytes")),
+    ]
+    known_bounds = [
+        math.ceil(total / per_node)
+        for total, per_node in per_node_bounds
+        if total is not None and per_node is not None
+    ]
+    aggregate_values = [
+        value for value in (total_cpus, mpi_ranks, gpus)
+        if value is not None and value > 0
+    ]
+    if not known_bounds or not aggregate_values:
+        return (1,) if hard_max_nodes is None or hard_max_nodes >= 1 else ()
+
+    minimum_nodes = max(1, *known_bounds)
+    common_divisor = math.gcd(*aggregate_values)
+    values = [
+        nodes
+        for nodes in _positive_divisors(common_divisor)
+        if nodes >= minimum_nodes
+        and (hard_max_nodes is None or nodes <= hard_max_nodes)
+        and (memory_bytes is None or memory_bytes % nodes == 0)
+    ]
+    return tuple(values[:limit])
+
+
+def _positive_divisors(value: int) -> tuple[int, ...]:
+    lower: list[int] = []
+    upper: list[int] = []
+    for candidate in range(1, math.isqrt(value) + 1):
+        if value % candidate:
+            continue
+        lower.append(candidate)
+        paired = value // candidate
+        if paired != candidate:
+            upper.append(paired)
+    return tuple(lower + list(reversed(upper)))
+
+
+def _applicable_hard_max_nodes(
+    target: Any, claims: Sequence[SitePolicyClaim]
+) -> int | None:
+    scheduler = target.metadata["scheduler"]
+    target_shape = ResourceShape(
+        scheduler_class=target.name,
+        node_class=_bounded_metadata_string(target.metadata.get("node_class")),
+        placement=_target_placement(target, scheduler),
+    )
+    applicable = [
+        claim.value
+        for claim in claims
+        if claim.is_hard
+        and claim.property == "max_nodes"
+        and policy_applies(claim, target_shape)
+    ]
+    if not applicable or any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        for value in applicable
+    ):
+        return None
+    normalized = {math.floor(value) for value in applicable}
+    if len(normalized) != 1:
+        return None
+    return normalized.pop()
+
+
+def _target_placement(target: Any, scheduler: str) -> dict[str, str]:
+    placement = {"target_id": target.id, "scheduler": scheduler}
+    account = _bounded_metadata_string(target.metadata.get("account"))
+    if account is not None:
+        placement["account"] = account
+    return placement
 
 
 def _shape_with_target_evidence(
@@ -263,16 +380,6 @@ def _authorization_claim_value(value: Any) -> str | None:
     ):
         return "unauthorized"
     return None
-
-
-def _dimension_values(
-    requested: int | None,
-    hinted: tuple[int, ...] | None,
-    default: tuple[int, ...],
-) -> tuple[int, ...]:
-    if requested is not None:
-        return (requested,)
-    return hinted or default
 
 
 def _optional_dimension_values(
@@ -448,7 +555,13 @@ def explore_candidates(
     theoretical = len(shapes) * len(envs) * assignment_count
     candidates: list[PlanningCandidate] = []
     groups = [(shape, environment) for shape in shapes for environment in envs]
-    expandable: list[tuple[ResourceShape, ResolvedEnvironment | None]] = []
+    expandable: list[
+        tuple[
+            ResourceShape,
+            ResolvedEnvironment | None,
+            list[dict[str, Any]],
+        ]
+    ] = []
     hard_groups: list[tuple[ResourceShape, ResolvedEnvironment | None]] = []
     hard_pruned = 0
     explored_groups: set[tuple[str, str | None]] = set()
@@ -463,17 +576,25 @@ def explore_candidates(
                 (shape.identity, None if environment is None else environment.context_id)
             )
         else:
-            expandable.append((shape, environment))
+            expandable.append(
+                (
+                    shape,
+                    environment,
+                    _assignments_by_constraint_feasibility(
+                        provider, assignments, shape
+                    ),
+                )
+            )
 
     # One assignment layer per group gives every viable shape/environment group
     # an opportunity before any group receives its next combination.
     for assignment_index in range(len(assignments)):
-        for shape, environment in expandable:
+        for shape, environment, group_assignments in expandable:
             if len(candidates) >= limit:
                 break
             candidates.append(
                 _evaluate_candidate(
-                    workload, shape, environment, assignments[assignment_index],
+                    workload, shape, environment, group_assignments[assignment_index],
                     provider, policy_claims,
                 )
             )
@@ -523,6 +644,29 @@ def explore_candidates(
         hard_pruned_count=hard_pruned,
         explored_group_count=len(explored_groups), total_group_count=len(groups),
     )
+
+
+def _assignments_by_constraint_feasibility(
+    provider: DeclarativeConstraintProvider | None,
+    assignments: list[dict[str, Any]],
+    shape: ResourceShape,
+) -> list[dict[str, Any]]:
+    if provider is None:
+        return assignments
+
+    def priority(item: tuple[int, dict[str, Any]]) -> tuple[int, int]:
+        index, parameters = item
+        evaluations = provider.evaluate(parameters, shape)
+        if any(result.state == "violated" and result.hard for result in evaluations):
+            return (2, index)
+        if any(result.state == "unknown" for result in evaluations):
+            return (1, index)
+        return (0, index)
+
+    return [
+        parameters
+        for _, parameters in sorted(enumerate(assignments), key=priority)
+    ]
 
 
 def _group_is_hard_invalid(

@@ -85,6 +85,44 @@ def provider_document(*, classification: str = "execution_only") -> dict[str, ob
     }
 
 
+def fixed_rank_provider_document(mpi_ranks: int) -> dict[str, object]:
+    return {
+        "kind": "bourne.constraint-provider",
+        "schema_version": 1,
+        "name": "fixed-mpi-ranks",
+        "provider_version": "1",
+        "parameters": [
+            {
+                "name": "ranks",
+                "classification": "execution_only",
+                "classification_evidence": {
+                    "kind": "provider_contract",
+                    "source": "reference",
+                },
+                "allowed_values": [mpi_ranks],
+            }
+        ],
+        "constraints": [
+            {
+                "id": "fixed-rank-count",
+                "operator": "equal",
+                "left": {"parameter": "ranks"},
+                "right": {"resource": "mpi_ranks"},
+                "hard": True,
+            },
+            {
+                "id": "ranks-divide-cpus",
+                "operator": "divisible_by",
+                "left": {"resource": "total_cpus"},
+                "right": {"resource": "mpi_ranks"},
+                "hard": True,
+            },
+        ],
+        "environment_requirements": [],
+        "launcher_requirements": [],
+    }
+
+
 class DeclarativeProviderTests(unittest.TestCase):
     def test_schema_contract_and_typed_ast_are_deterministic(self) -> None:
         provider = DeclarativeConstraintProvider.from_dict(provider_document())
@@ -134,6 +172,27 @@ class ConstraintPlanningTests(unittest.TestCase):
     def _workload(self, root: Path):
         return inspect_workload([sys.executable, "case.json"], cwd=root)
 
+    def _multi_node_case(self, root: Path, *, nodes: int | None = None):
+        snapshot = inventory_snapshot(root, scheduler_families=("slurm",))
+        scheduler_target = snapshot.execution_targets[0]
+        scheduler_target = replace(
+            scheduler_target,
+            metadata={**scheduler_target.metadata, "cpus_per_node": "64"},
+        )
+        snapshot = replace(
+            snapshot,
+            targets=[snapshot.current_target, scheduler_target],
+        )
+        workload = self._workload(root)
+        workload = replace(
+            workload,
+            resources=replace(workload.resources, cpus=512, nodes=nodes),
+        )
+        provider = DeclarativeConstraintProvider.from_dict(
+            fixed_rank_provider_document(512)
+        )
+        return snapshot, workload, provider
+
     def test_scheduler_classes_become_conservative_partial_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = inventory_snapshot(
@@ -162,11 +221,17 @@ class ConstraintPlanningTests(unittest.TestCase):
             shapes = generate_resource_shapes(snapshot, workload, provider=provider)
 
         self.assertTrue(shapes)
-        self.assertTrue(all(item.nodes == 1 for item in shapes))
+        self.assertTrue(any(item.nodes != 1 for item in shapes))
         self.assertEqual(
             {item.mpi_ranks for item in shapes}, {1, 2, 4, 8, 16}
         )
         self.assertTrue(all(item.total_cpus == item.mpi_ranks for item in shapes))
+        self.assertTrue(
+            all(
+                item.total_cpus == item.nodes * item.cpus_per_node
+                for item in shapes
+            )
+        )
         self.assertTrue(
             all(
                 evidence.get("authorization") == "unknown"
@@ -175,7 +240,75 @@ class ConstraintPlanningTests(unittest.TestCase):
                 if "authorization" in evidence
             )
         )
-        self.assertNotIn(4, {item.nodes for item in shapes})
+        self.assertIn(16, {item.nodes for item in shapes})
+
+    def test_provider_rank_requirement_derives_multi_node_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot, workload, provider = self._multi_node_case(Path(directory))
+            shapes = generate_resource_shapes(snapshot, workload, provider=provider)
+
+        by_nodes = {item.nodes: item for item in shapes}
+        eight = by_nodes[8]
+        sixteen = by_nodes[16]
+        self.assertEqual(
+            (eight.cpus_per_node, eight.mpi_ranks, eight.ranks_per_node),
+            (64, 512, 64),
+        )
+        self.assertEqual(
+            (sixteen.cpus_per_node, sixteen.mpi_ranks, sixteen.ranks_per_node),
+            (32, 512, 32),
+        )
+
+    def test_applicable_hard_max_nodes_bounds_automatic_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot, workload, provider = self._multi_node_case(Path(directory))
+            policy = SitePolicyClaim(
+                id=new_ulid(),
+                site_id=new_ulid(),
+                subject="site",
+                property="max_nodes",
+                value=16,
+                evidence_kind="site_declared",
+                interpretation_status="hard_constraint",
+                source_identity="official-policy",
+                created_at=utc_now(),
+                applicability=PolicyApplicability("global", None),
+            )
+            shapes = generate_resource_shapes(
+                snapshot, workload, provider=provider, policy_claims=[policy]
+            )
+
+        self.assertEqual({item.nodes for item in shapes}, {8, 16})
+
+    def test_unknown_authorization_does_not_suppress_generated_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot, workload, provider = self._multi_node_case(Path(directory))
+            shapes = generate_resource_shapes(snapshot, workload, provider=provider)
+            result = explore_candidates(workload, shapes, [], provider=provider)
+
+        self.assertIn(8, {item.nodes for item in shapes})
+        self.assertTrue(result.candidates)
+        self.assertTrue(
+            all(item.state == "unresolved" for item in result.candidates)
+        )
+        self.assertTrue(
+            all(
+                any(reason.code == "authorization_unknown" for reason in item.reasons)
+                for item in result.candidates
+            )
+        )
+
+    def test_explicit_node_request_disables_automatic_node_alternatives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot, workload, provider = self._multi_node_case(
+                Path(directory), nodes=16
+            )
+            shapes = generate_resource_shapes(snapshot, workload, provider=provider)
+
+        self.assertEqual({item.nodes for item in shapes}, {16})
+        shape = shapes[0]
+        self.assertEqual(shape.cpus_per_node, 32)
+        self.assertEqual(shape.ranks_per_node, 32)
 
     def test_policy_applicability_is_shape_scoped_and_preserves_evidence_kind(self) -> None:
         site_id = new_ulid()
