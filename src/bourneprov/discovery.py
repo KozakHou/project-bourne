@@ -41,6 +41,8 @@ def discover_site(
     cwd: Path | None = None,
     environment: Mapping[str, str] | None = None,
     providers: Sequence[DiscoveryProvider] | None = None,
+    site_label: str | None = None,
+    observation_scope: str = "current_identity_authorized_surface",
 ) -> InventorySnapshot:
     """Run isolated read-only providers and persist one immutable snapshot."""
 
@@ -87,11 +89,11 @@ def discover_site(
         id=snapshot_id,
         captured_at=captured_at,
         working_directory=str(working_directory),
-        site_label=None,
+        site_label=site_label,
         metadata={
             "bourne_version": __version__,
             "schema_version": 4,
-            "observation_scope": "current_identity_authorized_surface",
+            "observation_scope": observation_scope,
         },
         identity=state.identity,
         targets=sorted(state.targets, key=lambda item: (item.role, item.kind, item.name, item.id)),

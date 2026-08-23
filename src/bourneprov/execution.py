@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Sequence, TextIO
+from typing import BinaryIO, Mapping, Sequence, TextIO
 
 from .models import ExecutionResult
 
@@ -98,6 +98,7 @@ def execute_command(
     cwd: Path,
     stdout_stream: TextIO | None = None,
     stderr_stream: TextIO | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> ExecutionResult:
     """Execute *argv*, tee output live when requested, and preserve it."""
 
@@ -114,6 +115,7 @@ def execute_command(
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=None if environment is None else dict(environment),
             **_process_group_options(),
         )
     except FileNotFoundError:

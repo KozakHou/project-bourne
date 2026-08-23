@@ -1,9 +1,10 @@
 # Project Bourne MCP integration
 
-Project Bourne v0.6 adds a local agent interface using the official Model
+Project Bourne v0.6 added a local agent interface using the official Model
 Context Protocol Python SDK. MCP is an optional adapter over Bourne's existing
 structured services; it is not a second resolver, scheduler implementation, or
-execution engine.
+execution engine. v0.7 adds typed site discovery, candidate selection, and
+exact-execution reconciliation tools while keeping the MCP process local.
 
 ## Install and run
 
@@ -14,8 +15,12 @@ python -m pip install "bourneprov[mcp]==0.6.0"
 bourne mcp
 ```
 
-For development from a source checkout, use
-`python -m pip install -e ".[mcp]"` instead.
+For v0.7 development from a source checkout, use the committed uv lockfile:
+
+```bash
+uv sync --locked --all-extras --dev
+uv run --frozen --no-sync bourne mcp
+```
 
 The canonical entrypoint uses stdio only. Protocol frames use stdout; human
 diagnostics, logs, and direct workload output use stderr. Set
@@ -23,7 +28,7 @@ diagnostics, logs, and direct workload output use stderr. Set
 the default is `WARNING`. Request documents and environment dumps are not
 logged.
 
-The public npm launcher provides the same server:
+The public npm launcher provides the matching released server:
 
 ```bash
 npx -y @project-bourne/mcp@0.6.0
@@ -41,6 +46,7 @@ Release versions are coupled exactly:
 
 ```text
 @project-bourne/mcp 0.6.0 → bourneprov 0.6.0
+@project-bourne/mcp 0.7.0-dev.0 → bourneprov 0.7.0.dev0 (source validation only)
 ```
 
 ## Discovery and Registry identity
@@ -93,9 +99,16 @@ The compact tool surface is:
 | `bourne_validate_request` | Validate and normalize without discovery, planning, persistence, or execution. |
 | `bourne_discover` | Run bounded discovery and add an immutable inventory snapshot. |
 | `bourne_inventory` | Read `latest`, full ID, unique prefix, or `@N`; never rediscover. |
+| `bourne_site_list` | List configured non-secret local and SSH sites. |
+| `bourne_site_inspect` | Inspect one site, policy claims, and inventory identities. |
+| `bourne_site_discover` | Run one bounded typed discovery operation at a configured site. |
+| `bourne_site_policy_claim` | Persist one bounded structured policy claim and provenance; accepts no shell or source-document content. |
+| `bourne_site_candidates` | Produce a bounded ephemeral candidate set without executing. |
+| `bourne_site_select` | Persist the bounded selection summary and materialize one chosen plan, including any reviewed provider-bound JSON variant. |
 | `bourne_plan` | Persist intent/workload and resolve against one existing inventory; never execute. |
 | `bourne_execute_plan` | Execute one existing immutable plan without altering it. |
 | `bourne_execution_get` | Read request, plan, lifecycle, scheduler, allocation, experiment, telemetry, and verification state. |
+| `bourne_execution_reconcile` | Reconcile one exact remote execution without resubmitting it. |
 | `bourne_execution_wait` | Wait on one existing Bourne-managed scheduled execution with a bounded caller timeout. |
 | `bourne_execution_cancel` | Cancel only the exact job attached to one Bourne execution, subject to existing identity checks. |
 | `bourne_trace_artifact` | Trace artifact identity, producer, inputs, and ancestry without guessing. |
@@ -130,7 +143,9 @@ MCP input
 `bourne_execute_plan` accepts only a persisted plan ID. A different command,
 resource request, target, context, or backend requires a new request and plan.
 The adapter cannot submit arbitrary scheduler commands or cancel an arbitrary
-scheduler job ID.
+scheduler job ID. It exposes no general SSH, shell, upload, download, or remote
+filesystem tool. Remote operations terminate at Bourne Core's typed SSH
+transport and one-shot worker allowlist.
 
 Tool annotations describe likely effects for host UX. They are not an
 authorization or security boundary. Bourne Core remains responsible for
@@ -148,7 +163,8 @@ submission returns an execution ID, scheduler family, recorded job ID, and
 `submitted` state; it does not claim completion. Process status, verification,
 telemetry, and scientific validity remain distinct.
 
-The v0.6 server is local stdio on Linux and macOS. It does not provide a hosted
-HTTP endpoint, built-in LLM, natural-language parser, MCP Tasks mapping,
-dashboard, remote Bourne service, or Windows scientific process-tree claim.
-SQLite remains local, and `BOURNE_DB` selects the database as with the CLI.
+The v0.7 server remains local stdio on Linux and macOS. It does not provide a
+hosted HTTP endpoint, built-in LLM, natural-language parser, MCP Tasks mapping,
+dashboard, remote MCP service, or Windows scientific process-tree claim. AI,
+MCP, credentials, and persistent daemons are not placed on HPC systems. SQLite
+remains local, and `BOURNE_DB` selects the database as with the CLI.

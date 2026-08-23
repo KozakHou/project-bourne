@@ -3,21 +3,89 @@
 Project Bourne is open-source execution and provenance infrastructure for
 reproducible scientific and engineering workloads.
 
-It plans and executes computational experiments across local machines, GPUs,
-Slurm, and PBS while preserving inputs, outputs, execution context, artifact
-lineage, telemetry, verification, and the history needed to reproduce a
-result.
+It answers: **Exactly how did this scientific result come to exist?**
 
-It is designed for researchers, students from undergraduate through PhD level,
-faculty, research engineers, computational scientists, scientific software
-users, and scientific-computing teams across academia, public research, and
-industry R&D.
+## Keep AI off the cluster
+
+~~~text
+Researcher's workstation
+  Linux / macOS
+        │
+  AI / Agent (optional)
+        │ local stdio MCP
+        ▼
+  Bourne Control Plane
+        │
+        ├─ freezes immutable ExecutionPlan
+        ├─ builds/stages versioned Bourne workers
+        └─ uses existing VPN / OpenSSH
+        ▼
+
+HPC login / access node
+  one-shot Bourne Remote Worker
+        │
+        ├─ validates the plan
+        ├─ verifies staged file digests
+        ├─ stages the execution bundle
+        └─ submits with sbatch / qsub
+        ▼
+
+Slurm / PBS
+        │
+        │ allocates resources
+        ▼
+
+Compute allocation
+  execution-scoped Bourne Compute Worker
+        │
+        ├─ reads immutable ExecutionPlan
+        ├─ observes actual allocation
+        ├─ reproduces selected environment
+        ├─ performs compute-side preflight
+        ├─ executes exact scientific argv
+        └─ writes durable result evidence
+        ▼
+
+Scientific workload
+
+Later:
+
+Researcher's workstation
+        │
+        │ existing SSH
+        ▼
+Remote Worker: reconcile
+        │
+        ├─ exact Bourne-owned scheduler job state
+        └─ bounded result evidence
+        ▼
+Local Bourne provenance database
+~~~
+
+The Remote Worker and Compute Worker are not agents or persistent services;
+both are short-lived, versioned Bourne workers. Bourne does not SSH directly
+into compute nodes. Slurm/PBS places the Compute Worker inside the allocation
+and owns job lifetime after accepting the submission. The researcher's
+workstation / control plane may disconnect and reconcile the same execution
+later.
+
+The HPC path requires no AI, MCP server, AI credential, inbound port, root
+access, persistent daemon, or public-internet access on the cluster. It uses
+the researcher's existing OpenSSH configuration and scheduler access. Agents
+receive typed Bourne operations—not an unrestricted remote shell.
+
+The Bourne control plane is supported and tested on Linux and macOS. Native
+Windows is not yet validated or supported.
+
+Bourne remains agent-native, not agent-dependent. The CLI and Python services
+work without an agent or MCP.
 
 ## Quick Start
 
 ### Human
 
-The human CLI is public today:
+Install the current public package for local provenance and the existing
+Slurm/PBS workflow:
 
 ~~~bash
 python -m pip install bourneprov
@@ -30,21 +98,76 @@ bourne show @1
 bourne execute --request bourne.json
 ~~~
 
+For the v0.7 development checkout and site-aware SSH workflow:
+
+~~~bash
+uv sync --locked --all-extras --dev
+
+uv run bourne site add imperial \
+  --ssh login.example.edu \
+  --scheduler slurm \
+  --local-root "$PWD" \
+  --remote-root /work/$USER/project
+
+uv run bourne discover --site imperial
+uv run bourne plan --site imperial --request bourne.json --provider constraints.json
+~~~
+
+The first plan call prints bounded candidates. A human or agent then makes the
+preference decision explicitly:
+
+~~~bash
+uv run bourne plan --site imperial --request bourne.json \
+  --provider constraints.json \
+  --trust-provider-classifications \
+  --candidate sha256:...
+
+uv run bourne execute --plan <plan-id>
+uv run bourne execution wait <execution-id>
+~~~
+
+The trust flag is an explicit review decision for semantic classifications in
+that declarative provider; the provider cannot grant itself that authority.
+Use `--approve-variant-change PARAMETER` or
+`--declare-execution-only PARAMETER` for narrower user decisions. If the
+selected candidate changes a provider-bound JSON input, Bourne preserves the
+original and automatically binds a separately hashed `WorkloadVariant` to the
+plan.
+
+Slurm/PBS owns the job after acceptance. The researcher's workstation /
+control plane, VPN, SSH connection, MCP host, and agent may disconnect; Bourne
+reconnects later and reconciles the exact execution. An ambiguous connection
+failure never triggers blind resubmission.
+
 ### Agent / MCP
 
-The v0.6.0 agent and MCP entrypoints are public:
+The v0.6.0 agent and MCP entrypoints are public and remain local stdio:
 
 ~~~bash
 python -m pip install "bourneprov[mcp]==0.6.0"
+bourne mcp
+
+# Or use the public transparent launcher:
 npx -y @project-bourne/mcp@0.6.0
 ~~~
 
-For development from a source checkout instead:
+## Development
+
+Project Bourne uses `uv` as its development, dependency-locking, test, and
+build frontend. After installing uv, synchronize the committed lockfile and run
+the suite with:
 
 ~~~bash
-python -m pip install -e ".[mcp]"
-bourne mcp
+uv sync --locked --all-extras --dev
+uv run --frozen --no-sync python -W error::ResourceWarning -m unittest discover -s tests -v
+uv build --no-sources
 ~~~
+
+CI uses locked/frozen variants of these commands so an out-of-date `uv.lock`
+fails instead of drifting. uv is development tooling only: it is not a
+`bourneprov` runtime dependency, is not required for `pip install`, is not
+used by the npm launcher, and is never required on HPC login or compute nodes.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the complete contributor workflow.
 
 ## Why Bourne
 
@@ -62,11 +185,10 @@ bourne run mpirun -np 64 ./solver
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
 
-## Architecture
+## Core architecture
 
-Bourne Core owns deterministic execution, planning, storage, and provenance.
-Humans can use it through the CLI or Python services; agents can use the same
-services through the optional MCP adapter:
+Bourne Core owns deterministic execution, evidence, planning, storage, and
+provenance. CLI, SDK, and MCP are adapters over the same services:
 
 ~~~text
              Project Bourne Core
@@ -77,8 +199,12 @@ services through the optional MCP adapter:
     humans                     agents
 ~~~
 
-The agent interface is an optional access path, not Bourne's product identity.
-MCP works without the portable Skill, and Bourne contains no embedded LLM.
+The remote worker is one-shot, user-space, non-AI, and non-daemon. It accepts
+only versioned operations for discovery, plan validation, staging, scheduler
+submission, and reconciliation. Scientific commands remain exact argv in an
+immutable plan; no scientific argv is interpolated into remote shell text.
+The remote-worker protocol is v1, the worker-result protocol is v2, and the
+staged-plan protocol is v3.
 
 ## Agent and MCP Integration
 
@@ -403,8 +529,9 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening a v0.1.1, v0.2.0, v0.3.0, or v0.4.0 database with this release
-candidate performs deterministic transactional migrations through schema 5.
+Opening an older Bourne database, including released v0.1.1 through v0.6.0
+databases, with this development version performs deterministic transactional
+migrations through schema 6.
 Existing experiments, artifacts, lineage, inventories, workloads, plans,
 executions, scheduler jobs, allocations, events, and experiment links remain
 readable. Migration does not invent `ExecutionRequest` history for v0.4
@@ -421,19 +548,22 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The repository version is `0.6.0`. The base runtime has zero third-party
+The repository version is `0.7.0.dev0`. The base runtime has zero third-party
 dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:
 
 ~~~bash
-PYTHONPATH=src python -W error::ResourceWarning -m unittest discover -s tests -v
+uv sync --locked --all-extras --dev
+uv run --frozen --no-sync python -W error::ResourceWarning -m unittest discover -s tests -v
+uv build --no-sources
 ~~~
 
 stdout and stderr are still accumulated in memory before final persistence.
-Disk-spooled experiment logs, automatic artifact discovery, artifact archival,
-automatic scientific dependency installation, automatic module loading,
-container orchestration, SSH execution, remote copying, utilization sampling,
-profiling, arbitrary verification scripts, broad scientific-validity
-inference, hosted HTTP MCP, embedded LLMs, and natural-language parsing remain
-outside v0.6.0. See docs/VISION.md for the longer-term direction.
+Disk-spooled logs, automatic artifact discovery/archival, scientific dependency
+installation or source builds, generic data synchronization, unrestricted
+remote shell, scheduler-free disconnect-safe remote supervision, distributed
+telemetry, queue/performance prediction, arbitrary verification scripts,
+hosted HTTP MCP, embedded LLMs, and broad scientific-validity inference remain
+outside v0.7. See [the site-aware architecture](docs/SITE_AWARE_PLANNING.md) and
+[VISION](docs/VISION.md).

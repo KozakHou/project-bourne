@@ -42,6 +42,10 @@ from .workload_storage import (
     ExecutionStore,
     PlanNotFound,
 )
+from .constraint_providers import DeclarativeConstraintProvider, ProviderContractError
+from .site_service import SitePlanningService, SitePlanningSession, SiteService
+from .site_models import PolicyApplicability
+from .site_storage import SiteNotFound
 
 MAX_WAIT_SECONDS = 7 * 24 * 60 * 60
 
@@ -88,6 +92,9 @@ class BourneAgentService:
         self.inventories = InventoryStore(self.database_path)
         self.executions = ExecutionStore(self.database_path)
         self.execution_service = ExecutionService(self.executions, self.inventories)
+        self.site_service = SiteService(self.database_path)
+        self.site_planning = SitePlanningService(self.database_path)
+        self._site_sessions: dict[str, SitePlanningSession] = {}
 
     def request_schema(self) -> dict[str, Any]:
         return {
@@ -118,6 +125,135 @@ class BourneAgentService:
             "inventory": snapshot.to_dict(),
             "summary": _inventory_summary(snapshot),
         }
+
+    def sites(self) -> dict[str, Any]:
+        return {"sites": [item.to_dict() for item in self.site_service.sites.list()]}
+
+    def site(self, reference: str) -> dict[str, Any]:
+        try:
+            site = self.site_service.sites.get(reference)
+        except SiteNotFound:
+            raise AgentInterfaceError(
+                "unknown_site", f"No configured site matches '{reference}'."
+            ) from None
+        return {
+            "site": site.to_dict(),
+            "policy_claims": [
+                item.to_dict()
+                for item in self.site_service.sites.policy_claims(site.id)
+            ],
+            "inventory_snapshot_ids": self.site_service.sites.inventory_ids(site.id),
+        }
+
+    def discover_site(self, reference: str) -> dict[str, Any]:
+        try:
+            snapshot = self.site_service.discover(reference, cwd=self.cwd)
+        except (SiteNotFound, RuntimeError, OSError, ValueError) as exc:
+            self._raise("site_discovery_failed", "Site discovery failed.", exc)
+        return {
+            "site": reference,
+            "snapshot_id": snapshot.id,
+            "inventory": snapshot.to_dict(),
+            "summary": _inventory_summary(snapshot),
+        }
+
+    def site_policy_claim(
+        self, reference: str, claim: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Submit one typed structured claim; source documents are not accepted."""
+
+        try:
+            applicability_value = claim.get("applicability", {})
+            if not isinstance(applicability_value, Mapping):
+                raise ValueError("policy applicability must be a structured object")
+            applicability = PolicyApplicability.from_dict(dict(applicability_value))
+            saved = self.site_service.submit_policy_claim(
+                reference,
+                subject=claim["subject"], property=claim["property"],
+                value=claim["value"], evidence_kind=claim["evidence_kind"],
+                interpretation_status=claim["interpretation_status"],
+                source_identity=claim["source_identity"],
+                applicability=applicability,
+                source_identifier=claim.get("source_identifier"),
+                source_url=claim.get("source_url"),
+                retrieved_at=claim.get("retrieved_at"),
+                document_date=claim.get("document_date"),
+                content_digest=claim.get("content_digest"),
+            )
+        except (KeyError, SiteNotFound, TypeError, ValueError) as exc:
+            self._raise("invalid_site_policy_claim", "Site policy claim was rejected.", exc)
+        return {"policy_claim": saved.to_dict(), "source_content_stored": False}
+
+    def site_candidates(
+        self,
+        reference: str,
+        request: object,
+        *,
+        provider: dict[str, Any] | None = None,
+        inventory_reference: str = "latest",
+    ) -> dict[str, Any]:
+        try:
+            site = self.site_service.sites.get(reference)
+            if inventory_reference == "latest":
+                ids = self.site_service.sites.inventory_ids(site.id, 1)
+                if not ids:
+                    raise ValueError("site has no recorded inventory")
+                inventory = self.inventories.get(ids[0])
+            else:
+                inventory = self._inventory(inventory_reference)
+            parsed_provider = (
+                None
+                if provider is None
+                else DeclarativeConstraintProvider.from_dict(provider)
+            )
+            session = self.site_planning.explore_request(
+                self._parse_request(request), site.id, inventory,
+                provider=parsed_provider,
+            )
+        except (SiteNotFound, ProviderContractError, ValueError) as exc:
+            self._raise("site_planning_failed", "Site candidate planning failed.", exc)
+        self._site_sessions[session.request.id] = session
+        return session.to_dict()
+
+    def site_select(
+        self,
+        request_id: str,
+        candidate_id: str,
+        *,
+        selection_source: str,
+        rationale: str | None = None,
+        variant_approvals: list[str] | None = None,
+        explicit_user_declarations: list[str] | None = None,
+        trusted_provider_contract: bool = False,
+    ) -> dict[str, Any]:
+        session = self._site_sessions.get(request_id)
+        if session is None:
+            raise AgentInterfaceError(
+                "unknown_candidate_session",
+                "Candidate exploration is ephemeral; regenerate candidates first.",
+            )
+        try:
+            plan = self.site_planning.select(
+                session, candidate_id, selection_source=selection_source,
+                selection_rationale=rationale,
+                variant_approvals={item: True for item in (variant_approvals or [])},
+                explicit_user_declarations={
+                    item: True for item in (explicit_user_declarations or [])
+                },
+                trusted_provider_contract=trusted_provider_contract,
+            )
+        except (PermissionError, ProviderContractError, ValueError) as exc:
+            self._raise("candidate_selection_failed", "Candidate selection failed.", exc)
+        return {"plan": plan.to_dict(), "rationale_is_evidence": False}
+
+    def execution_reconcile(self, reference: str) -> dict[str, Any]:
+        execution_id = self._execution_id(reference)
+        execution = self.executions.get_execution(execution_id)
+        try:
+            result = self.execution_service.collect_execution(execution_id)
+        except BackendError:
+            return self.execution_get(execution_id)
+        return self._execution_result(result)
 
     def inventory(self, reference: str = "latest") -> dict[str, Any]:
         snapshot = self._inventory(reference)
@@ -232,7 +368,7 @@ class BourneAgentService:
             result = self.execution_service.wait_execution(
                 execution_id,
                 timeout_seconds=timeout_seconds,
-                backend=backend if isinstance(backend, SchedulerBackend) else None,
+                backend=backend if hasattr(backend, "wait") else None,
             )
         except TimeoutError as exc:
             self._raise("wait_timeout", "Execution wait timed out.", exc)
@@ -253,7 +389,7 @@ class BourneAgentService:
             backend = self.backends.get(execution.backend)
             self.execution_service.cancel_execution(
                 execution_id,
-                backend=backend if isinstance(backend, SchedulerBackend) else None,
+                backend=backend if hasattr(backend, "cancel") else None,
             )
         except (BackendError, OSError, ValueError) as exc:
             self._raise("scheduler_error", "The scheduler cancellation failed.", exc)

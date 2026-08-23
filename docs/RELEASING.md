@@ -35,6 +35,23 @@ Before publishing, confirm that:
 - wheel metadata contains the expected `License-Expression` and `License-File`;
 - both the wheel and source distribution contain the intended license files.
 
+## Locked development and build tooling
+
+`uv.lock` is the committed authority for Python development and validation.
+Before preparing a release, run:
+
+```bash
+uv sync --locked --all-extras --dev
+uv run --frozen --no-sync python -W error::ResourceWarning -m unittest discover -s tests -v
+uv build --no-sources
+uv run --frozen --no-sync twine check dist/*
+```
+
+`uv build --no-sources` deliberately validates the standards-based package
+metadata rather than any local uv source override. The setuptools build backend
+remains authoritative. uv is not installed into the released package, remote
+worker, HPC environment, or npm launcher.
+
 ## Publishing a release
 
 1. Update and validate the version in `pyproject.toml`.
@@ -54,9 +71,10 @@ Before publishing, confirm that:
    ```
 
 The release workflow checks that the Git tag matches the package version,
-builds one wheel and one source distribution, validates their metadata, runs the
-full test suite against the installed wheel, publishes through OIDC, and
-attaches the same distributions to the GitHub Release.
+performs a locked uv sync, builds one wheel and one source distribution with
+`uv build --no-sources`, validates their metadata, runs the full test suite
+against the installed wheel, publishes through OIDC, and attaches the same
+distributions to the GitHub Release.
 
 ## v0.6 multi-registry sequence
 

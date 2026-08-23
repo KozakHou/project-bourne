@@ -22,6 +22,7 @@ from .execution_outcomes import (
 from .execution_request import ExecutionRequest
 from .identity import current_process_identity
 from .inventory_models import InventorySnapshot
+from .planning_models import ResourceShape
 from .worker_bundle import build_worker_zipapp, write_staged_plan
 from .worker_result import WorkerResult, WorkerResultError, load_worker_result
 from .workload import utc_now
@@ -34,7 +35,7 @@ DEFAULT_SCHEDULER_POLL_SECONDS = 15.0
 MAX_SCHEDULER_POLL_SECONDS = 60.0
 _SAFE_SCHEDULER_NAME = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 _SAFE_SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
-_SAFE_PBS_JOB = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_SAFE_PBS_JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 CommandRunner = Callable[..., BoundedCommandResult]
 
@@ -626,10 +627,44 @@ def render_batch_script(
 
 
 def _slurm_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]:
-    resources = plan.requested_resources
     values = ["#SBATCH --job-name=bourne"]
     if target_name:
         values.append(f"#SBATCH --partition={target_name}")
+    if plan.resource_shape is not None:
+        shape = plan.resource_shape
+        if shape.nodes is not None:
+            values.append(f"#SBATCH --nodes={shape.nodes}")
+        if shape.mpi_ranks is not None:
+            values.append(f"#SBATCH --ntasks={shape.mpi_ranks}")
+        if shape.ranks_per_node is not None:
+            values.append(f"#SBATCH --ntasks-per-node={shape.ranks_per_node}")
+        threads = _shape_threads_per_rank(shape)
+        if threads is not None:
+            values.append(f"#SBATCH --cpus-per-task={threads}")
+        elif shape.mpi_ranks is None:
+            if shape.cpus_per_node is not None:
+                values.append("#SBATCH --ntasks-per-node=1")
+                values.append(f"#SBATCH --cpus-per-task={shape.cpus_per_node}")
+            elif shape.total_cpus is not None and shape.nodes in {None, 1}:
+                values.append(f"#SBATCH --cpus-per-task={shape.total_cpus}")
+            elif shape.total_cpus is not None:
+                raise ValueError(
+                    "multi-node Slurm shape requires CPUs per node or MPI layout"
+                )
+        if shape.gpus_per_node is not None:
+            values.append(f"#SBATCH --gpus-per-node={shape.gpus_per_node}")
+        elif shape.gpus is not None:
+            values.append(f"#SBATCH --gpus={shape.gpus}")
+        memory_per_node = _shape_per_node(
+            shape.memory_bytes, shape.memory_per_node_bytes, shape.nodes, "memory"
+        )
+        if memory_per_node is not None:
+            values.append(f"#SBATCH --mem={_mebibytes(memory_per_node)}M")
+        if shape.walltime_seconds is not None:
+            values.append(f"#SBATCH --time={_walltime(shape.walltime_seconds)}")
+        return values
+
+    resources = plan.requested_resources
     for name, option in (("nodes", "nodes"), ("cpus", "cpus-per-task"), ("gpus", "gpus"), ("mpi_ranks", "ntasks")):
         value = getattr(resources, name)
         if value is not None:
@@ -642,10 +677,41 @@ def _slurm_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]
 
 
 def _pbs_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]:
-    resources = plan.requested_resources
     values = ["#PBS -N bourne"]
     if target_name:
         values.append(f"#PBS -q {target_name}")
+    if plan.resource_shape is not None:
+        shape = plan.resource_shape
+        nodes = shape.nodes or 1
+        chunks = [f"select={nodes}"]
+        cpus_per_node = _shape_per_node(
+            shape.total_cpus, shape.cpus_per_node, shape.nodes, "CPUs"
+        )
+        if cpus_per_node is not None:
+            chunks.append(f"ncpus={cpus_per_node}")
+        gpus_per_node = _shape_per_node(
+            shape.gpus, shape.gpus_per_node, shape.nodes, "GPUs"
+        )
+        if gpus_per_node is not None:
+            chunks.append(f"ngpus={gpus_per_node}")
+        memory_per_node = _shape_per_node(
+            shape.memory_bytes, shape.memory_per_node_bytes, shape.nodes, "memory"
+        )
+        if memory_per_node is not None:
+            chunks.append(f"mem={_mebibytes(memory_per_node)}mb")
+        ranks_per_node = _shape_per_node(
+            shape.mpi_ranks, shape.ranks_per_node, shape.nodes, "MPI ranks"
+        )
+        if ranks_per_node is not None:
+            chunks.append(f"mpiprocs={ranks_per_node}")
+        if shape.threads_per_rank is not None:
+            chunks.append(f"ompthreads={shape.threads_per_rank}")
+        values.append("#PBS -l " + ":".join(chunks))
+        if shape.walltime_seconds is not None:
+            values.append(f"#PBS -l walltime={_walltime(shape.walltime_seconds)}")
+        return values
+
+    resources = plan.requested_resources
     chunks = [f"select={resources.nodes or 1}"]
     if resources.cpus is not None:
         chunks.append(f"ncpus={resources.cpus}")
@@ -657,6 +723,32 @@ def _pbs_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]:
     if resources.walltime_seconds is not None:
         values.append(f"#PBS -l walltime={_walltime(resources.walltime_seconds)}")
     return values
+
+
+def _shape_threads_per_rank(shape: ResourceShape) -> int | None:
+    if shape.threads_per_rank is not None:
+        return shape.threads_per_rank
+    if shape.total_cpus is None or shape.mpi_ranks is None:
+        return None
+    if shape.total_cpus % shape.mpi_ranks:
+        raise ValueError("resource-shape CPUs are not divisible across MPI ranks")
+    return shape.total_cpus // shape.mpi_ranks
+
+
+def _shape_per_node(
+    total: int | None,
+    per_node: int | None,
+    nodes: int | None,
+    label: str,
+) -> int | None:
+    if per_node is not None:
+        return per_node
+    if total is None:
+        return None
+    effective_nodes = nodes or 1
+    if total % effective_nodes:
+        raise ValueError(f"resource-shape {label} are not divisible across nodes")
+    return total // effective_nodes
 
 
 def _target_name(plan: ExecutionPlan, inventory: InventorySnapshot) -> str | None:

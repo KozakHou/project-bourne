@@ -238,6 +238,55 @@ class ExecutionStore:
                     raise ValueError("execution plan scheduler must match its backend")
             elif plan.backend != "direct":
                 raise ValueError("scheduled execution plans require a scheduler")
+            if plan.site_id is not None:
+                site = connection.execute(
+                    "SELECT id FROM sites WHERE id = ?", (plan.site_id,)
+                ).fetchone()
+                if site is None:
+                    raise ValueError("execution plan site does not exist")
+                linked = connection.execute(
+                    """
+                    SELECT site_id FROM inventory_site_links
+                    WHERE snapshot_id = ?
+                    """,
+                    (plan.inventory_snapshot_id,),
+                ).fetchone()
+                if linked is None or linked["site_id"] != plan.site_id:
+                    raise ValueError("execution plan inventory must belong to its site")
+                if plan.selection_summary_id is not None:
+                    selection = connection.execute(
+                        """
+                        SELECT workload_id, site_id FROM candidate_selection_summaries
+                        WHERE id = ?
+                        """,
+                        (plan.selection_summary_id,),
+                    ).fetchone()
+                    if selection is None or selection["site_id"] != plan.site_id:
+                        raise ValueError("plan selection summary does not match site")
+                if plan.workload_variant_id is not None:
+                    variant = connection.execute(
+                        "SELECT workload_id FROM workload_variants WHERE id = ?",
+                        (plan.workload_variant_id,),
+                    ).fetchone()
+                    if variant is None:
+                        raise ValueError("plan workload variant does not exist")
+                    if (
+                        plan.selection_summary_id is None
+                        or selection["workload_id"] != variant["workload_id"]
+                    ):
+                        raise ValueError("plan selection/variant lineage does not match")
+                elif (
+                    plan.selection_summary_id is not None
+                    and selection["workload_id"] != plan.workload_id
+                ):
+                    raise ValueError("plan selection summary does not match workload")
+            elif any(
+                value is not None
+                for value in (
+                    plan.selection_summary_id, plan.workload_variant_id,
+                )
+            ):
+                raise ValueError("site planning records require a plan site")
             connection.execute(
                 """
                 INSERT INTO execution_plans (
@@ -253,6 +302,18 @@ class ExecutionStore:
                     plan.created_at, _json(plan.to_dict()),
                 ),
             )
+            if plan.site_id is not None:
+                connection.execute(
+                    """
+                    INSERT INTO execution_plan_site_links (
+                        plan_id, site_id, selection_summary_id, workload_variant_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        plan.id, plan.site_id, plan.selection_summary_id,
+                        plan.workload_variant_id,
+                    ),
+                )
 
     def get_plan(self, plan_id: str) -> ExecutionPlan:
         with self._connection() as connection:
@@ -374,6 +435,17 @@ class ExecutionStore:
                 (limit,),
             ).fetchall()
         return [_execution_from_row(row) for row in rows]
+
+    def latest_execution_for_plan(self, plan_id: str) -> ExecutionAttempt | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_attempts WHERE plan_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (plan_id,),
+            ).fetchone()
+        return None if row is None else _execution_from_row(row)
 
     def set_staging_directory(self, execution_id: str, path: str, observed_at: str) -> None:
         with self._connection() as connection:

@@ -174,3 +174,34 @@ class InventorySnapshot:
             "evidence": [asdict(item) for item in self.evidence],
             "providers": [asdict(item) for item in self.providers],
         }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "InventorySnapshot":
+        """Decode the stable API representation used by typed remote discovery."""
+
+        snapshot = value.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ValueError("inventory snapshot envelope is missing")
+        targets: list[DiscoveredTarget] = []
+        current = value.get("current_target")
+        if current is not None:
+            targets.append(DiscoveredTarget(**current))
+        targets.extend(DiscoveredTarget(**item) for item in value.get("execution_targets", []))
+        identity = value.get("identity")
+        return cls(
+            id=snapshot["id"], captured_at=snapshot["captured_at"],
+            working_directory=snapshot["working_directory"],
+            site_label=snapshot.get("site_label"),
+            metadata=dict(snapshot.get("metadata", {})),
+            identity=None if identity is None else CurrentIdentity(**identity),
+            targets=targets,
+            storage=[StorageResource(**item) for item in value.get("storage", [])],
+            schedulers=[SchedulerResource(**item) for item in value.get("scheduler", [])],
+            execution_contexts=[
+                DiscoveredExecutionContext(**item)
+                for item in value.get("execution_contexts", [])
+            ],
+            capabilities=[Capability(**item) for item in value.get("capabilities", [])],
+            evidence=[DiscoveryEvidence(**item) for item in value.get("evidence", [])],
+            providers=[ProviderResult(**item) for item in value.get("providers", [])],
+        )

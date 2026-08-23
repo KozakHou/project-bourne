@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bourneprov"
-version = "0.6.0"
+version = "0.7.0.dev0"
 description = "Execution and provenance infrastructure for reproducible scientific and engineering workloads."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,12 @@ dependencies = []
 
 [project.optional-dependencies]
 mcp = ["mcp>=2.0.0,<3"]
+
+[dependency-groups]
+dev = [
+  "mcp>=2.0.0,<3",
+  "twine>=6.1,<7",
+]
 
 [project.scripts]
 bourne = "bourneprov.cli:main"

@@ -59,8 +59,12 @@ MCP adapter, transparent npm launcher, and portable agent guidance while
 keeping deterministic semantics in Bourne Core. User intent, workload
 understanding, planning, execution attempts, scheduler facts, actual
 experiments, telemetry, verification, and general scientific validity remain
-distinct; see [Execution requests, telemetry, and verification](EXECUTION_REQUESTS.md)
-and [MCP integration](MCP.md).
+distinct. The v0.7 architecture adds site-aware constraint planning and a
+typed, non-AI remote worker over the researcher's existing OpenSSH path. It
+keeps AI, MCP, credentials, and persistent services off the cluster while the
+scheduler owns accepted job lifetime. See [Execution requests, telemetry, and
+verification](EXECUTION_REQUESTS.md), [MCP integration](MCP.md), and
+[Site-aware planning](SITE_AWARE_PLANNING.md).
 
 ---
 
@@ -349,7 +353,7 @@ Scientific experiment
 
 Scientific provenance belongs to the environment where the experiment actually executes.
 
-For the first version:
+The original and still-valid manual workflow is:
 
 ```text
 ssh remote-machine
@@ -358,17 +362,17 @@ bourne run ./experiment
 
 Bourne records that remote machine.
 
-Future Bourne versions may understand separate:
+The v0.7 site-aware workflow distinguishes:
 
-* control machines
-* SSH connections
-* login nodes
-* schedulers
-* compute nodes
-* containers
-* execution contexts
+* the local control machine and local SQLite authority;
+* an existing OpenSSH connection to a configured access site;
+* a one-shot, user-space, non-AI access-node worker;
+* the Slurm/PBS scheduler that owns accepted job lifetime;
+* an execution-scoped worker inside the compute allocation; and
+* the exact scientific argv and actual execution context.
 
-Remote orchestration is not required for Bourne to provide immediate value.
+Remote orchestration remains optional. It never turns Bourne into a general
+remote shell and does not install dependencies or require uv on the cluster.
 
 ---
 
@@ -1011,10 +1015,14 @@ Unified execution requests + telemetry + deterministic artifact verification
         │
         ▼
 v0.6
-Closed-loop execution
+Local MCP adapter + agent guidance
         │
         ▼
-v0.7+
+v0.7
+Site-aware constraint planning + typed remote scheduler execution
+        │
+        ▼
+v0.8+
 Graph / agent-assisted scientific execution
 ```
 

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bourne.dev/schemas/constraint-provider-v1.schema.json",
+  "title": "Project Bourne declarative constraint provider v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schema_version", "name", "provider_version"],
+  "properties": {
+    "kind": {"const": "bourne.constraint-provider"},
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "provider_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "source_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "parameters": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/parameter"}
+    },
+    "constraints": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/constraint"}
+    },
+    "environment_requirements": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/requirement"}
+    },
+    "launcher_requirements": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/requirement"}
+    }
+  },
+  "$defs": {
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "classification", "classification_evidence"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "classification": {
+          "enum": ["execution_only", "performance_tunable", "scientific_semantics", "unknown"]
+        },
+        "classification_evidence": {"type": "object"},
+        "allowed_values": {"type": "array", "maxItems": 64},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"},
+        "default": {},
+        "scientific_equivalence": {"type": "boolean"},
+        "binding": {"$ref": "#/$defs/binding"}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "input", "path"],
+      "properties": {
+        "kind": {"const": "json_path"},
+        "input": {"type": "string", "minLength": 1},
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": 0}]}
+        }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "operator", "left", "right"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "operator": {
+          "enum": ["equal", "not_equal", "less_than", "less_or_equal", "greater_than", "greater_or_equal", "divisible_by"]
+        },
+        "left": {"$ref": "#/$defs/expression"},
+        "right": {"$ref": "#/$defs/expression"},
+        "hard": {"type": "boolean"},
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "expression": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["constant"], "properties": {"constant": {}}},
+        {"type": "object", "additionalProperties": false, "required": ["parameter"], "properties": {"parameter": {"type": "string", "minLength": 1}}},
+        {"type": "object", "additionalProperties": false, "required": ["resource"], "properties": {"resource": {"type": "string", "minLength": 1}}},
+        {"type": "object", "additionalProperties": false, "required": ["add"], "properties": {"add": {"type": "array", "minItems": 2, "maxItems": 16, "items": {"$ref": "#/$defs/expression"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["multiply"], "properties": {"multiply": {"type": "array", "minItems": 2, "maxItems": 16, "items": {"$ref": "#/$defs/expression"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["subtract"], "properties": {"subtract": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/expression"}}}}
+      ]
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string"},
+        "required": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -4,6 +4,14 @@ Project Bourne v0.3.0 discovery records what the current researcher's execution
 surface looked like at a particular time. It does not choose an environment,
 submit a job, or certify that a workload will run.
 
+v0.7 reuses the same bounded providers through a configured `Site`. Local
+sites discover in-process; `remote_ssh` sites invoke only the typed `discover`
+operation of a one-shot Bourne worker through the user's existing OpenSSH
+configuration. The remote worker performs bounded login/access-node
+observations and returns structured JSON. It does not accept a command string,
+run AI/MCP, read credentials, install dependencies, or connect to compute
+nodes. Login-node facts remain distinct from compute-allocation facts.
+
 ## Snapshot and topology semantics
 
 Every `bourne discover` creates a new immutable, 26-character ULID snapshot in
@@ -120,7 +128,8 @@ details. The PBS query returns queue summaries and persists only a small field
 allow-list. Bourne does not query all-user jobs—or any jobs in v0.3—submit,
 launch, cancel, or mutate scheduler state. Read-only scheduler clients may
 contact their locally configured controller; discovery otherwise makes no
-network requests and never uses SSH.
+network requests. The v0.3 local command never uses SSH; v0.7 site discovery
+adds only the typed remote adapter described above.
 
 Container discovery lists ID, name, image reference, and state. It never
 starts, stops, attaches to, executes inside, mounts, removes, builds, or pulls a
@@ -145,12 +154,11 @@ The following distinctions are permanent:
 - the current access target is not the same as a scheduler-visible compute
   target class.
 
-The target/context/storage relationships are queryable so a future workload
-resolver can consider direct or scheduler-mediated execution without changing
-workload semantics. Scheduler execution will need separate control-plane
-submission, scheduler job, requested resource, allocated resource, actual
-target, and actual scientific experiment records. v0.3 deliberately creates
-none of those execution entities and performs no selection or ranking.
+The target/context/storage relationships are queryable by the v0.7 site-aware
+resolver without changing workload semantics. Discovery itself still creates
+no plan, scheduler job, allocation, or experiment. Candidate exploration,
+selection, submission, allocation observation, and experiment persistence are
+separate records and services.
 
 ## JSON API shape
 

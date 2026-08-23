@@ -6,16 +6,17 @@ import logging
 import os
 from collections.abc import Callable
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__
 from .agent_interface import AgentInterfaceError, BourneAgentService
 from .execution_request import execution_request_schema
+from .constraint_providers import provider_schema
 
 SERVER_NAME = "project-bourne"
 SERVER_TITLE = "Project Bourne"
@@ -52,6 +53,66 @@ def _request_input_schema() -> dict[str, Any]:
 ExecutionRequestDocument = Annotated[
     dict[str, Any], WithJsonSchema(_request_input_schema())
 ]
+
+
+def _provider_input_schema() -> dict[str, Any]:
+    """Expose a bounded MCP shape while Core performs full recursive validation."""
+
+    def simplify(value: Any) -> Any:
+        if isinstance(value, dict):
+            if "$ref" in value:
+                return {"type": "object"}
+            return {
+                key: simplify(item)
+                for key, item in value.items()
+                if key not in {"$schema", "$id", "$defs"}
+            }
+        if isinstance(value, list):
+            return [simplify(item) for item in value]
+        return value
+
+    return simplify(provider_schema())
+
+
+DeclarativeProviderDocument = Annotated[
+    dict[str, Any], WithJsonSchema(_provider_input_schema())
+]
+
+BoundedPolicyValue = bool | int | float | Annotated[str, Field(max_length=4096)]
+
+
+class PolicyApplicabilityDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal[
+        "global", "scheduler_class", "queue", "partition", "node_class", "account"
+    ] = "global"
+    value: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+
+
+class SitePolicyClaimDocument(BaseModel):
+    """Bounded structured policy evidence; never a shell or source-document body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: Annotated[str, Field(min_length=1, max_length=256)]
+    property: Annotated[str, Field(min_length=1, max_length=256)]
+    value: BoundedPolicyValue
+    evidence_kind: Literal[
+        "observed_now", "site_declared", "user_declared", "historical", "inferred", "unknown"
+    ]
+    interpretation_status: Literal["hard_constraint", "advisory", "unresolved"]
+    source_identity: Annotated[str, Field(min_length=1, max_length=512)]
+    applicability: PolicyApplicabilityDocument = Field(
+        default_factory=PolicyApplicabilityDocument
+    )
+    source_identifier: Annotated[str, Field(max_length=2048)] | None = None
+    source_url: Annotated[str, Field(max_length=2048)] | None = None
+    retrieved_at: Annotated[str, Field(max_length=128)] | None = None
+    document_date: Annotated[str, Field(max_length=128)] | None = None
+    content_digest: Annotated[
+        str, Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    ] | None = None
 
 
 class ProductError(BaseModel):
@@ -195,6 +256,106 @@ def create_mcp_server(
         return await call("inventory", partial(agent.inventory, reference))
 
     @server.tool(
+        name="bourne_site_list",
+        description="List configured non-secret local and SSH site contexts.",
+        annotations=_annotation(read_only=True, idempotent=True),
+        structured_output=True,
+    )
+    async def bourne_site_list() -> ToolResult:
+        return await call("site_list", agent.sites)
+
+    @server.tool(
+        name="bourne_site_inspect",
+        description="Inspect one configured site, its policy claims, and inventory identities.",
+        annotations=_annotation(read_only=True, idempotent=True),
+        structured_output=True,
+    )
+    async def bourne_site_inspect(reference: str) -> ToolResult:
+        return await call("site_inspect", partial(agent.site, reference))
+
+    @server.tool(
+        name="bourne_site_discover",
+        description="Run bounded typed discovery at one configured site; no arbitrary SSH command is accepted.",
+        annotations=_annotation(read_only=False, open_world=True),
+        structured_output=True,
+    )
+    async def bourne_site_discover(reference: str) -> ToolResult:
+        return await call(
+            "site_discover", partial(agent.discover_site, reference), mutation=True
+        )
+
+    @server.tool(
+        name="bourne_site_policy_claim",
+        description=(
+            "Persist one bounded structured site-policy claim and provenance. "
+            "This accepts no shell command or source-document content."
+        ),
+        annotations=_annotation(read_only=False, destructive=False),
+        structured_output=True,
+    )
+    async def bourne_site_policy_claim(
+        reference: str,
+        claim: SitePolicyClaimDocument,
+    ) -> ToolResult:
+        return await call(
+            "site_policy_claim",
+            partial(
+                agent.site_policy_claim,
+                reference,
+                claim.model_dump(exclude_none=True),
+            ),
+            mutation=True,
+        )
+
+    @server.tool(
+        name="bourne_site_candidates",
+        description="Generate bounded ephemeral site-aware plan candidates without executing.",
+        annotations=_annotation(read_only=False, destructive=False),
+        structured_output=True,
+    )
+    async def bourne_site_candidates(
+        reference: str,
+        request: ExecutionRequestDocument,
+        provider: DeclarativeProviderDocument | None = None,
+        inventory_reference: str = "latest",
+    ) -> ToolResult:
+        return await call(
+            "site_candidates",
+            partial(
+                agent.site_candidates, reference, request, provider=provider,
+                inventory_reference=inventory_reference,
+            ),
+            mutation=True,
+        )
+
+    @server.tool(
+        name="bourne_site_select",
+        description="Persist a bounded selection summary and materialize one viable immutable plan.",
+        annotations=_annotation(read_only=False, destructive=False),
+        structured_output=True,
+    )
+    async def bourne_site_select(
+        request_id: str,
+        candidate_id: str,
+        selection_source: str,
+        rationale: str | None = None,
+        variant_approvals: list[str] | None = None,
+        explicit_user_declarations: list[str] | None = None,
+        trusted_provider_contract: bool = False,
+    ) -> ToolResult:
+        return await call(
+            "site_select",
+            partial(
+                agent.site_select, request_id, candidate_id,
+                selection_source=selection_source, rationale=rationale,
+                variant_approvals=variant_approvals,
+                explicit_user_declarations=explicit_user_declarations,
+                trusted_provider_contract=trusted_provider_contract,
+            ),
+            mutation=True,
+        )
+
+    @server.tool(
         name="bourne_plan",
         description=(
             "Persist and resolve an ExecutionRequest v1 against an existing inventory. "
@@ -243,6 +404,19 @@ def create_mcp_server(
     async def bourne_execution_get(reference: str) -> ToolResult:
         return await call(
             "execution_get", partial(agent.execution_get, reference)
+        )
+
+    @server.tool(
+        name="bourne_execution_reconcile",
+        description="Reconnect and reconcile one exact Bourne-owned remote execution; never resubmit.",
+        annotations=_annotation(read_only=False, open_world=True),
+        structured_output=True,
+    )
+    async def bourne_execution_reconcile(reference: str) -> ToolResult:
+        return await call(
+            "execution_reconcile",
+            partial(agent.execution_reconcile, reference),
+            mutation=True,
         )
 
     @server.tool(

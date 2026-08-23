@@ -12,7 +12,8 @@ from .execution_request import ExecutionRequest
 from .workload_models import ExecutionPlan, WorkloadSpec
 
 RELEASED_V04_STAGED_PLAN_SCHEMA_VERSION = 1
-STAGED_PLAN_SCHEMA_VERSION = 2
+RELEASED_V05_STAGED_PLAN_SCHEMA_VERSION = 2
+STAGED_PLAN_SCHEMA_VERSION = 3
 
 
 def build_worker_zipapp(target: Path) -> Path:
@@ -36,6 +37,30 @@ def build_worker_zipapp(target: Path) -> Path:
     return target
 
 
+def build_remote_worker_zipapp(target: Path) -> Path:
+    """Build the exact-version, stdlib-only, one-shot login-node worker."""
+
+    package_source = Path(__file__).resolve().parent
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError(target)
+    with tempfile.TemporaryDirectory(prefix="bourne-remote-worker-") as raw_directory:
+        source = Path(raw_directory)
+        shutil.copytree(
+            package_source, source / "bourneprov",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+        (source / "__main__.py").write_text(
+            "from bourneprov.remote_worker import main\nraise SystemExit(main())\n",
+            encoding="utf-8",
+        )
+        zipapp.create_archive(
+            source, target=target, compressed=True,
+            interpreter="/usr/bin/env python3",
+        )
+    return target
+
+
 def write_staged_plan(
     target: Path,
     execution_id: str,
@@ -49,7 +74,17 @@ def write_staged_plan(
         "schema_version": (
             RELEASED_V04_STAGED_PLAN_SCHEMA_VERSION
             if request is None
-            else STAGED_PLAN_SCHEMA_VERSION
+            else (
+                STAGED_PLAN_SCHEMA_VERSION
+                if any(
+                    value is not None
+                    for value in (
+                        plan.site_id, plan.resource_shape, plan.environment,
+                        plan.workload_variant_id, plan.selection_summary_id,
+                    )
+                ) or plan.policy_basis
+                else RELEASED_V05_STAGED_PLAN_SCHEMA_VERSION
+            )
         ),
         "execution_id": execution_id,
         "plan": plan.to_dict(),

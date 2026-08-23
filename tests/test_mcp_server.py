@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.execution_request import execution_request_schema
 from bourneprov.workload_storage import ExecutionStore
+from tests.test_v07_planning import provider_document
 from tests.v04_fixtures import inventory_snapshot
 
 if Client is not None:
@@ -32,9 +34,16 @@ TOOLS = [
     "bourne_validate_request",
     "bourne_discover",
     "bourne_inventory",
+    "bourne_site_list",
+    "bourne_site_inspect",
+    "bourne_site_discover",
+    "bourne_site_policy_claim",
+    "bourne_site_candidates",
+    "bourne_site_select",
     "bourne_plan",
     "bourne_execute_plan",
     "bourne_execution_get",
+    "bourne_execution_reconcile",
     "bourne_execution_wait",
     "bourne_execution_cancel",
     "bourne_trace_artifact",
@@ -60,6 +69,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
             async with Client(server) as client:
                 listed = await client.list_tools()
+                response = await client.call_tool("bourne_request_schema", {})
 
         self.assertEqual([tool.name for tool in listed.tools], TOOLS)
         by_name = {tool.name: tool for tool in listed.tools}
@@ -76,13 +86,13 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_name["bourne_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execute_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execution_cancel"].annotations.destructive_hint)
-
-        with tempfile.TemporaryDirectory() as directory:
-            server = create_mcp_server(
-                BourneAgentService(Path(directory) / "bourne.sqlite3")
-            )
-            async with Client(server) as client:
-                response = await client.call_tool("bourne_request_schema", {})
+        policy_schema = by_name["bourne_site_policy_claim"].input_schema
+        claim_schema = policy_schema["properties"]["claim"]
+        if "$ref" in claim_schema:
+            claim_schema = policy_schema["$defs"]["SitePolicyClaimDocument"]
+        self.assertNotIn("command", claim_schema["properties"])
+        self.assertNotIn("content", claim_schema["properties"])
+        self.assertNotIn("shell", " ".join(by_name))
         self.assertEqual(
             response.structured_content["data"]["schema"],
             execution_request_schema(),
@@ -202,6 +212,125 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unknown_plan.structured_content["error"]["code"], "unknown_plan")
         self.assertTrue(all(item.structured_content["ok"] for item in reads))
         self.assertTrue(all(item.structured_content["ok"] for item in mutations))
+
+    async def test_site_candidate_selection_tools_use_structured_core_services(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            agent = BourneAgentService(database, cwd=root)
+            site = agent.site_service.add_site(
+                "fixture-hpc", scheduler_hint="slurm",
+                local_project_root=str(root),
+            )
+            snapshot = inventory_snapshot(
+                root, scheduler_families=("slurm",),
+                executable=Path(sys.executable).name,
+            )
+            target = replace(
+                snapshot.execution_targets[0],
+                authorization="unknown",
+            )
+            snapshot = replace(
+                snapshot,
+                site_label=site.name,
+                targets=[snapshot.current_target, target],
+            )
+            InventoryStore(database).save(snapshot)
+            agent.site_service.sites.link_inventory(site.id, snapshot.id)
+            case = root / "case.json"
+            original = b'{"decomposition":{"x":1,"y":1},"science":42}\n'
+            case.write_bytes(original)
+            document = execution_request(
+                [sys.executable, "case.json"],
+                artifacts={"inputs": ["case.json"]},
+                execution={"backend": "slurm"},
+            )
+            provider = provider_document()
+            provider["environment_requirements"] = []
+            provider["launcher_requirements"] = []
+            server = create_mcp_server(agent)
+            async with Client(server) as client:
+                listed = await client.call_tool("bourne_site_list", {})
+                inspected = await client.call_tool(
+                    "bourne_site_inspect", {"reference": site.id}
+                )
+                policy = await client.call_tool(
+                    "bourne_site_policy_claim",
+                    {
+                        "reference": site.id,
+                        "claim": {
+                            "subject": "reviewed-user-account",
+                            "property": "authorization",
+                            "value": True,
+                            "evidence_kind": "user_declared",
+                            "interpretation_status": "advisory",
+                            "source_identity": "mcp-test-user",
+                            "applicability": {"scope": "global"},
+                        },
+                    },
+                )
+                explored = await client.call_tool(
+                    "bourne_site_candidates",
+                    {
+                        "reference": site.id, "request": document,
+                        "provider": provider,
+                    },
+                )
+                request_id = explored.structured_content["data"]["request"]["id"]
+                candidate = next(
+                    item
+                    for item in explored.structured_content["data"]["exploration"]["candidates"]
+                    if item["state"] == "viable"
+                    and item["parameters"] == {"px": 2, "py": 2}
+                )
+                unreviewed = await client.call_tool(
+                    "bourne_site_select",
+                    {
+                        "request_id": request_id,
+                        "candidate_id": candidate["id"],
+                        "selection_source": "test-agent",
+                    },
+                )
+                selected = await client.call_tool(
+                    "bourne_site_select",
+                    {
+                        "request_id": request_id,
+                        "candidate_id": candidate["id"],
+                        "selection_source": "test-human",
+                        "rationale": "focused MCP contract test",
+                        "trusted_provider_contract": True,
+                    },
+                )
+                unknown = await client.call_tool(
+                    "bourne_execution_reconcile",
+                    {"reference": "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+                )
+            original_after = case.read_bytes()
+
+        self.assertEqual(listed.structured_content["data"]["sites"][0]["id"], site.id)
+        self.assertEqual(inspected.structured_content["data"]["site"]["name"], "fixture-hpc")
+        self.assertTrue(policy.structured_content["ok"])
+        self.assertEqual(
+            policy.structured_content["data"]["policy_claim"]["evidence_kind"],
+            "user_declared",
+        )
+        self.assertEqual(candidate["state"], "viable")
+        shape = candidate["resource_shape"]
+        self.assertEqual(shape["total_cpus"], 4)
+        self.assertEqual(shape["mpi_ranks"], 4)
+        self.assertIn(shape["nodes"], (1, 2, 4))
+        self.assertEqual(shape["nodes"] * shape["cpus_per_node"], 4)
+        self.assertEqual(shape["nodes"] * shape["ranks_per_node"], 4)
+        self.assertEqual(
+            unreviewed.structured_content["error"]["code"],
+            "candidate_selection_failed",
+        )
+        self.assertEqual(selected.structured_content["data"]["plan"]["site_id"], site.id)
+        self.assertIsNotNone(
+            selected.structured_content["data"]["plan"]["workload_variant_id"]
+        )
+        self.assertEqual(original_after, original)
+        self.assertEqual(unknown.structured_content["error"]["code"], "unknown_execution")
 
     async def test_real_stdio_negotiates_current_protocol_and_keeps_stdout_pure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
