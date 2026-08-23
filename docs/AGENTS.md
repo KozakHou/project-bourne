@@ -23,7 +23,7 @@ scientific correctness.
 ## MCP connection
 
 An MCP-capable host connects to the local stdio server through `bourne mcp` or
-`npx -y @project-bourne/mcp@0.6.0`. The canonical Registry identity is
+`npx -y @project-bourne/mcp@0.7.0`. The canonical Registry identity is
 `io.github.KozakHou/project-bourne`. MCP translates structured tool calls into
 the same Bourne Core services used by the CLI; it does not replace the resolver,
 scheduler backends, provenance store, or authorization boundary.

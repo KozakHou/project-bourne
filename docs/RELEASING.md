@@ -66,7 +66,7 @@ worker, HPC environment, or npm launcher.
 7. Verify installation in a fresh environment:
 
    ```bash
-   python -m pip install bourneprov==0.6.0
+   python -m pip install bourneprov==0.7.0
    bourne --version
    ```
 
@@ -76,18 +76,18 @@ performs a locked uv sync, builds one wheel and one source distribution with
 against the installed wheel, publishes through OIDC, and attaches the same
 distributions to the GitHub Release.
 
-## v0.6 multi-registry sequence
+## v0.7 multi-registry sequence
 
 The existing GitHub Release workflow is the authority for Python publication,
-so the final v0.6 order is:
+so the final v0.7 order is:
 
-1. Merge the reviewed v0.6 pull request and require the full Python and Node
+1. Merge the reviewed v0.7 pull request and require the full Python and Node
    matrices to pass on `main`.
 2. Prepare and review the final Python and npm versions and package contents.
-3. Publish the `v0.6.0` GitHub Release from the intended `main` commit. Wait for
+3. Publish the `v0.7.0` GitHub Release from the intended `main` commit. Wait for
    its existing trusted-publishing workflow to publish and verify
-   `bourneprov==0.6.0` on PyPI and attach the Python distributions.
-4. Publish `@project-bourne/mcp@0.6.0` to npm only from a maintainer identity
+   `bourneprov==0.7.0` on PyPI and attach the Python distributions.
+4. Publish `@project-bourne/mcp@0.7.0` to npm only from a maintainer identity
    that controls the `@project-bourne` scope.
 5. Verify the public npm tarball, exact Python-version coupling, and that its
    `mcpName` is `io.github.KozakHou/project-bourne`.
@@ -97,9 +97,9 @@ so the final v0.6 order is:
    intents after the Skill is merged.
 
 Never publish Registry metadata for an npm version that does not yet exist.
-Do not run `gh skill publish` as part of v0.6 unless its interaction with the
-existing `v0.6.0` tag and GitHub Release has been reviewed; the merged public
-`SKILL.md` remains discoverable without a second release.
+Do not run `gh skill publish` as part of v0.7 unless its interaction with the
+`v0.7.0` tag and GitHub Release has been reviewed; the merged public `SKILL.md`
+remains discoverable without a second release.
 
 For future Registry automation, use a post-npm, non-pull-request GitHub Actions
 job with `id-token: write`, `mcp-publisher login github-oidc`, and

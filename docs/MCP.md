@@ -11,11 +11,11 @@ exact-execution reconciliation tools while keeping the MCP process local.
 The core remains dependency-free. Install MCP support explicitly:
 
 ```bash
-python -m pip install "bourneprov[mcp]==0.6.0"
+python -m pip install "bourneprov[mcp]==0.7.0"
 bourne mcp
 ```
 
-For v0.7 development from a source checkout, use the committed uv lockfile:
+For repository development from a source checkout, use the committed uv lockfile:
 
 ```bash
 uv sync --locked --all-extras --dev
@@ -31,9 +31,9 @@ logged.
 The public npm launcher provides the matching released server:
 
 ```bash
-npx -y @project-bourne/mcp@0.6.0
-npx -y @project-bourne/mcp@0.6.0 --doctor
-npx -y @project-bourne/mcp@0.6.0 --no-bootstrap
+npx -y @project-bourne/mcp@0.7.0
+npx -y @project-bourne/mcp@0.7.0 --doctor
+npx -y @project-bourne/mcp@0.7.0 --no-bootstrap
 ```
 
 It requires Node.js 22+. It first locates Python 3.10+ with the exact compatible
@@ -45,8 +45,8 @@ and never invokes a shell. Bootstrap output goes to stderr.
 Release versions are coupled exactly:
 
 ```text
-@project-bourne/mcp 0.6.0 → bourneprov 0.6.0
-@project-bourne/mcp 0.7.0-dev.0 → bourneprov 0.7.0.dev0 (source validation only)
+@project-bourne/mcp 0.6.0 → bourneprov 0.6.0 (historical release)
+@project-bourne/mcp 0.7.0 → bourneprov 0.7.0
 ```
 
 ## Discovery and Registry identity
@@ -62,8 +62,8 @@ the npm package `@project-bourne/mcp`. Its name must equal the package's
 `mcpName`; deterministic repository tests enforce that identity and version
 coupling. No HTTP or hosted transport is advertised.
 
-The v0.6.0 npm package and Registry entry are public. Their package, version,
-`mcpName`, and stdio transport identities match.
+The v0.7.0 npm package metadata and Registry entry have matching package,
+version, `mcpName`, and stdio transport identities.
 
 ## Generic host configuration
 

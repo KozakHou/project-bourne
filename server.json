@@ -7,12 +7,12 @@
     "url": "https://github.com/KozakHou/project-bourne",
     "source": "github"
   },
-  "version": "0.7.0-dev.0",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@project-bourne/mcp",
-      "version": "0.7.0-dev.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       }
