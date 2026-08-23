@@ -76,5 +76,5 @@ test, and build frontend. CI uses locked/frozen semantics and release builds use
 `uv build --no-sources`. setuptools remains the build backend. uv is not a
 runtime, pip-user, npm-launcher, remote-worker, or HPC-node dependency.
 
-No v0.7 artifact is published during implementation or release-candidate
-preparation.
+Release artifacts are version-coupled as `bourneprov 0.7.0`,
+`@project-bourne/mcp 0.7.0`, and MCP Registry server version `0.7.0`.

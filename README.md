@@ -84,11 +84,11 @@ work without an agent or MCP.
 
 ### Human
 
-Install the current public package for local provenance and the existing
-Slurm/PBS workflow:
+Install Project Bourne v0.7.0 for local provenance and site-aware Slurm/PBS
+workflows:
 
 ~~~bash
-python -m pip install bourneprov
+python -m pip install "bourneprov==0.7.0"
 
 bourne run python examples/demo.py
 bourne list
@@ -98,32 +98,30 @@ bourne show @1
 bourne execute --request bourne.json
 ~~~
 
-For the v0.7 development checkout and site-aware SSH workflow:
+Configure a site-aware SSH workflow with the installed CLI:
 
 ~~~bash
-uv sync --locked --all-extras --dev
-
-uv run bourne site add imperial \
+bourne site add imperial \
   --ssh login.example.edu \
   --scheduler slurm \
   --local-root "$PWD" \
   --remote-root /work/$USER/project
 
-uv run bourne discover --site imperial
-uv run bourne plan --site imperial --request bourne.json --provider constraints.json
+bourne discover --site imperial
+bourne plan --site imperial --request bourne.json --provider constraints.json
 ~~~
 
 The first plan call prints bounded candidates. A human or agent then makes the
 preference decision explicitly:
 
 ~~~bash
-uv run bourne plan --site imperial --request bourne.json \
+bourne plan --site imperial --request bourne.json \
   --provider constraints.json \
   --trust-provider-classifications \
   --candidate sha256:...
 
-uv run bourne execute --plan <plan-id>
-uv run bourne execution wait <execution-id>
+bourne execute --plan <plan-id>
+bourne execution wait <execution-id>
 ~~~
 
 The trust flag is an explicit review decision for semantic classifications in
@@ -141,14 +139,14 @@ failure never triggers blind resubmission.
 
 ### Agent / MCP
 
-The v0.6.0 agent and MCP entrypoints are public and remain local stdio:
+The v0.7.0 agent and MCP entrypoints remain local stdio:
 
 ~~~bash
-python -m pip install "bourneprov[mcp]==0.6.0"
+python -m pip install "bourneprov[mcp]==0.7.0"
 bourne mcp
 
 # Or use the public transparent launcher:
-npx -y @project-bourne/mcp@0.6.0
+npx -y @project-bourne/mcp@0.7.0
 ~~~
 
 ## Development
@@ -210,8 +208,8 @@ staged-plan protocol is v3.
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.6.0
-npm package and matching Registry entry are public.
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.7.0
+npm package and matching Registry metadata use the same release identity.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v1,
@@ -530,7 +528,7 @@ export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
 Opening an older Bourne database, including released v0.1.1 through v0.6.0
-databases, with this development version performs deterministic transactional
+databases, with v0.7.0 performs deterministic transactional
 migrations through schema 6.
 Existing experiments, artifacts, lineage, inventories, workloads, plans,
 executions, scheduler jobs, allocations, events, and experiment links remain
@@ -548,7 +546,7 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The repository version is `0.7.0.dev0`. The base runtime has zero third-party
+The repository version is `0.7.0`. The base runtime has zero third-party
 dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:
