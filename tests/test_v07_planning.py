@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 import json
 import os
 import sys
@@ -25,8 +26,13 @@ from bourneprov.planning_models import (
     ResolvedEnvironment,
     ResourceShape,
 )
-from bourneprov.site_models import SitePolicyClaim
-from bourneprov.site_planning import explore_candidates, resource_shapes_from_inventory
+from bourneprov.site_models import PolicyApplicability, SitePolicyClaim
+from bourneprov.site_service import SiteService
+from bourneprov.site_planning import (
+    explore_candidates,
+    generate_resource_shapes,
+    resource_shapes_from_inventory,
+)
 from bourneprov.variants import materialize_json_variant
 from bourneprov.workload import inspect_workload, utc_now
 from bourneprov.workload_models import DecisionEvidence, ExecutionPlan
@@ -146,6 +152,170 @@ class ConstraintPlanningTests(unittest.TestCase):
         self.assertTrue(
             all(item["authorization"] == "unknown" for item in slurm.evidence)
         )
+
+    def test_real_inventory_generates_concrete_shapes_without_visible_node_authority(self) -> None:
+        provider = DeclarativeConstraintProvider.from_dict(provider_document())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = inventory_snapshot(root, scheduler_families=("slurm",))
+            workload = self._workload(root)
+            shapes = generate_resource_shapes(snapshot, workload, provider=provider)
+
+        self.assertTrue(shapes)
+        self.assertTrue(all(item.nodes == 1 for item in shapes))
+        self.assertEqual(
+            {item.mpi_ranks for item in shapes}, {1, 2, 4, 8, 16}
+        )
+        self.assertTrue(all(item.total_cpus == item.mpi_ranks for item in shapes))
+        self.assertTrue(
+            all(
+                evidence.get("authorization") == "unknown"
+                for shape in shapes
+                for evidence in shape.evidence
+                if "authorization" in evidence
+            )
+        )
+        self.assertNotIn(4, {item.nodes for item in shapes})
+
+    def test_policy_applicability_is_shape_scoped_and_preserves_evidence_kind(self) -> None:
+        site_id = new_ulid()
+        gpu_policy = SitePolicyClaim(
+            id=new_ulid(), site_id=site_id, subject="gpu-queue",
+            property="max_nodes", value=2, evidence_kind="user_declared",
+            interpretation_status="hard_constraint", source_identity="reviewed-user-input",
+            created_at=utc_now(),
+            applicability=PolicyApplicability("queue", "gpu"),
+        )
+        cpu_policy = replace(
+            gpu_policy, id=new_ulid(), subject="cpu-queue", value=8,
+            evidence_kind="site_declared",
+            applicability=PolicyApplicability("partition", "cpu"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workload = self._workload(Path(directory))
+            cpu = ResourceShape(
+                nodes=4, scheduler_class="cpu",
+                evidence=[{"authorization": "observed-authorized"}],
+            )
+            gpu = ResourceShape(
+                nodes=4, scheduler_class="gpu",
+                evidence=[{"authorization": "observed-authorized"}],
+            )
+            result = explore_candidates(
+                workload, [cpu, gpu], [], policy_claims=[gpu_policy, cpu_policy]
+            )
+            scoped_shape = ResourceShape(
+                nodes=4, scheduler_class="cpu", node_class="standard",
+                placement={"account": "science"},
+                evidence=[{"authorization": "observed-authorized"}],
+            )
+            unrelated = [
+                replace(
+                    gpu_policy, id=new_ulid(), value=2,
+                    applicability=PolicyApplicability("node_class", "gpu"),
+                ),
+                replace(
+                    gpu_policy, id=new_ulid(), value=2,
+                    applicability=PolicyApplicability("account", "other"),
+                ),
+                replace(
+                    cpu_policy, id=new_ulid(), value=8,
+                    applicability=PolicyApplicability("global"),
+                ),
+            ]
+            unrelated_result = explore_candidates(
+                workload, [scoped_shape], [], policy_claims=unrelated
+            )
+            matching_account_result = explore_candidates(
+                workload, [scoped_shape], [],
+                policy_claims=[
+                    replace(
+                        gpu_policy, id=new_ulid(), value=2,
+                        applicability=PolicyApplicability("account", "science"),
+                    )
+                ],
+            )
+
+        states = {
+            item.resource_shape.scheduler_class: item.state
+            for item in result.candidates
+        }
+        self.assertEqual(states, {"cpu": "viable", "gpu": "policy_incompatible"})
+        gpu_candidate = next(
+            item for item in result.candidates
+            if item.resource_shape.scheduler_class == "gpu"
+        )
+        self.assertEqual(gpu_candidate.reasons[0].evidence_kind, "user_declared")
+        self.assertEqual(unrelated_result.candidates[0].state, "viable")
+        self.assertEqual(
+            matching_account_result.candidates[0].state, "policy_incompatible"
+        )
+
+    def test_core_policy_submission_is_typed_bounded_and_round_trips_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service = SiteService(Path(directory) / "bourne.sqlite3")
+            site = service.add_site("policy-site")
+            saved = service.submit_policy_claim(
+                site.id, subject="cpu-account", property="max_nodes", value=8,
+                evidence_kind="user_declared",
+                interpretation_status="hard_constraint",
+                source_identity="reviewed-user-input",
+                applicability=PolicyApplicability("account", "science"),
+                source_identifier="policy-v1",
+            )
+            reopened = service.sites.policy_claims(site.id)[0]
+
+        parameters = inspect.signature(service.submit_policy_claim).parameters
+        self.assertNotIn("command", parameters)
+        self.assertNotIn("content", parameters)
+        self.assertEqual(reopened, saved)
+        self.assertEqual(reopened.applicability, PolicyApplicability("account", "science"))
+        self.assertEqual(reopened.evidence_kind, "user_declared")
+
+    def test_fair_search_reaches_viable_group_after_sixty_four_invalid_combinations(self) -> None:
+        document = {
+            "kind": "bourne.constraint-provider", "schema_version": 1,
+            "name": "fair-search", "provider_version": "1",
+            "parameters": [{
+                "name": "choice", "classification": "unknown",
+                "classification_evidence": {"kind": "unknown"},
+                "allowed_values": list(range(64)),
+            }],
+            "constraints": [{
+                "id": "minimum-nodes", "operator": "greater_or_equal",
+                "left": {"resource": "nodes"}, "right": {"constant": 2},
+                "hard": True, "message": "at least two nodes",
+            }],
+            "environment_requirements": [], "launcher_requirements": [],
+        }
+        provider = DeclarativeConstraintProvider.from_dict(document)
+        invalid = ResourceShape(
+            nodes=1, evidence=[{"authorization": "observed-authorized"}]
+        )
+        viable = ResourceShape(
+            nodes=2, evidence=[{"authorization": "observed-authorized"}]
+        )
+        # Make the invalid shape the first deterministic group, as in the
+        # starvation regression, without changing the resource assertion.
+        if invalid.identity > viable.identity:
+            for index in range(256):
+                candidate = replace(invalid, architecture=f"invalid-{index}")
+                if candidate.identity < viable.identity:
+                    invalid = candidate
+                    break
+        self.assertLess(invalid.identity, viable.identity)
+        with tempfile.TemporaryDirectory() as directory:
+            result = explore_candidates(
+                self._workload(Path(directory)), [invalid, viable], [],
+                provider=provider, limit=64,
+            )
+
+        self.assertEqual(result.theoretical_count, 128)
+        self.assertEqual(result.generated_count, 64)
+        self.assertEqual(result.hard_pruned_count, 64)
+        self.assertTrue(any(item.state == "viable" for item in result.candidates))
+        self.assertFalse(result.truncated)
+        self.assertIn("explored all 128", result.coverage)
 
     def test_shape_search_is_bounded_and_reports_truncation(self) -> None:
         document = provider_document()
@@ -298,11 +468,11 @@ class VariantAndEnvironmentTests(unittest.TestCase):
             original.write_bytes(original_raw)
             first = materialize_json_variant(
                 "workload", original, root / "stage", {"px": 2, "py": 2},
-                provider, proposer="agent",
+                provider, proposer="agent", trusted_provider_contract=True,
             )
             second = materialize_json_variant(
                 "workload", original, root / "stage", {"px": 4, "py": 1},
-                provider, proposer="human",
+                provider, proposer="human", trusted_provider_contract=True,
             )
             first_value = json.loads(Path(first.derived_path).read_text())
             second_value = json.loads(Path(second.derived_path).read_text())
@@ -314,7 +484,10 @@ class VariantAndEnvironmentTests(unittest.TestCase):
 
     def test_semantic_classification_rules_and_specific_approval(self) -> None:
         execution_only = DeclarativeConstraintProvider.from_dict(provider_document()).parameter("px")
-        self.assertTrue(automatic_change_allowed(execution_only))
+        self.assertFalse(automatic_change_allowed(execution_only))
+        self.assertTrue(
+            automatic_change_allowed(execution_only, trusted_provider_contract=True)
+        )
         agent_document = provider_document()
         agent_document["parameters"][0]["classification_evidence"] = {"kind": "agent_assertion"}  # type: ignore[index]
         inferred = DeclarativeConstraintProvider.from_dict(agent_document).parameter("px")
@@ -326,7 +499,15 @@ class VariantAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(unknown.classification, "unknown")
         performance = replace(execution_only, classification="performance_tunable")
         self.assertFalse(automatic_change_allowed(performance))
-        self.assertTrue(automatic_change_allowed(replace(performance, scientific_equivalence=True)))
+        self.assertFalse(
+            automatic_change_allowed(replace(performance, scientific_equivalence=True))
+        )
+        self.assertTrue(
+            automatic_change_allowed(
+                replace(performance, scientific_equivalence=True),
+                trusted_provider_contract=True,
+            )
+        )
 
     def test_existing_environment_activation_is_scoped_and_failure_prevents_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

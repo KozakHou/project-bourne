@@ -88,6 +88,14 @@ interpretation status, source identity, and optional identifier/URL,
 retrieval/document time, and content digest. Bourne does not crawl policy
 sites. Humans, agents, or future integrations provide claims.
 
+Every claim also has explicit applicability: `global`, scheduler class,
+queue, partition, node class, or account. Evaluation matches that scope to the
+candidate shape before applying the property. A GPU-queue limit therefore
+cannot reject an unrelated CPU-queue candidate. The original evidence kind is
+retained in both storage and rejection explanations. The structured Core/SDK
+operation and `bourne_site_policy_claim` MCP tool accept claim fields and
+provenance only; neither accepts a shell command or source-document body.
+
 Only a clear `hard_constraint` backed by `site_declared` or `user_declared`
 evidence can hard-reject. Advisory language remains advisory. If two credible
 hard claims conflict, both remain stored. A shape satisfying every current
@@ -102,6 +110,12 @@ value.
 threads/rank, GPUs, GPUs/node, memory and memory/node, architecture/node class,
 walltime, scheduler queue/partition/class, placement metadata, and evidence.
 Two shapes with the same total CPU count can therefore remain distinct.
+Normal site planning generates concrete bounded request shapes from workload
+requirements, declarative-provider resource equalities, and observed
+scheduler/node capacity. Observed capacity limits a request but does not grant
+access. In particular, a visible-node count is never used as authorization or
+as a permitted maximum. A site/user authorization claim may resolve access;
+otherwise authorization remains unknown.
 
 The declarative resolver intersects:
 
@@ -115,9 +129,12 @@ workload/provider constraints
 ~~~
 
 Known hard incompatibilities are rejected. Unknown facts remain unresolved.
-Candidate enumeration is deterministic and capped at 64 descriptions. The
-result records theoretical/materialized counts, truncation, and coverage; a
-truncated set is never described as exhaustive.
+Candidate enumeration is deterministic and capped at 64 descriptions. Cheap
+shape/environment hard failures are pruned before parameter expansion, and
+remaining groups are enumerated in deterministic round-robin layers. The
+result records theoretical, materialized, hard-pruned, and group counts. An
+incomplete result explicitly describes the explored subset and never treats
+zero viable candidates in that subset as proof of global absence.
 
 Bourne owns feasibility, evidence, and validation. A human or agent owns the
 objective and final choice among viable candidates. Selection rationale stays
@@ -161,17 +178,27 @@ and derived SHA-256 hashes, changed fields, proposer, unchanged semantic
 classifications, supporting contract evidence, and change-specific approval.
 Multiple variants do not share a derived file.
 
+When the chosen candidate changes a provider-bound JSON value, Core selection
+performs this materialization automatically, creates the effective
+`ExecutionRequest`, and binds the immutable plan to the variant. CLI callers
+can provide `--approve-variant-change PARAMETER`,
+`--declare-execution-only PARAMETER`, or the explicit reviewed-provider trust
+decision `--trust-provider-classifications`. MCP selection exposes the same
+bounded decisions as typed fields.
+
 Parameter rules are:
 
-- `execution_only`: automatic only with machine/provider contract evidence or
-  an explicit user declaration;
-- `performance_tunable`: automatic only with contract evidence of the relevant
-  scientific equivalence;
+- `execution_only`: automatic only after a specific user declaration or an
+  explicit decision to trust the reviewed provider classification;
+- `performance_tunable`: automatic only after that trust decision and contract
+  evidence of the relevant scientific equivalence;
 - `scientific_semantics`: a specific change requires user approval;
 - `unknown`: a specific change requires user approval and remains classified
   unknown afterward.
 
-An agent assertion alone does not establish classification or permission.
+Classification evidence embedded in a declarative provider is not itself a
+trust decision. An agent assertion—or an agent-written `provider_contract`
+label—cannot establish classification authority or permission by itself.
 
 ## Existing environments only
 

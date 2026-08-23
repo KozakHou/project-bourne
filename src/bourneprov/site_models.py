@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
@@ -17,6 +18,9 @@ SiteEvidenceKind = Literal[
     "unknown",
 ]
 PolicyInterpretation = Literal["hard_constraint", "advisory", "unresolved"]
+PolicyScope = Literal[
+    "global", "scheduler_class", "queue", "partition", "node_class", "account"
+]
 
 _SITE_KINDS = {"local", "remote_ssh"}
 _EVIDENCE_KINDS = {
@@ -24,6 +28,9 @@ _EVIDENCE_KINDS = {
     "inferred", "unknown",
 }
 _INTERPRETATIONS = {"hard_constraint", "advisory", "unresolved"}
+_POLICY_SCOPES = {
+    "global", "scheduler_class", "queue", "partition", "node_class", "account"
+}
 _SITE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
 
@@ -107,6 +114,32 @@ class Site:
 
 
 @dataclass(frozen=True)
+class PolicyApplicability:
+    """Typed scope identifying the resource shapes to which a claim applies."""
+
+    scope: PolicyScope = "global"
+    value: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.scope not in _POLICY_SCOPES:
+            raise ValueError(f"unsupported policy applicability scope: {self.scope}")
+        if self.scope == "global":
+            if self.value is not None:
+                raise ValueError("global policy applicability cannot have a value")
+        elif not isinstance(self.value, str) or not self.value or len(self.value) > 256:
+            raise ValueError("scoped policy applicability requires a bounded value")
+        if self.value is not None and any(character in self.value for character in "\r\n\0"):
+            raise ValueError("policy applicability value is invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PolicyApplicability":
+        return cls(**value)
+
+
+@dataclass(frozen=True)
 class SitePolicyClaim:
     """A structured policy assertion whose provenance is never discarded."""
 
@@ -124,6 +157,7 @@ class SitePolicyClaim:
     retrieved_at: str | None = None
     document_date: str | None = None
     content_digest: str | None = None
+    applicability: PolicyApplicability = field(default_factory=PolicyApplicability)
 
     def __post_init__(self) -> None:
         if not all(
@@ -147,10 +181,38 @@ class SitePolicyClaim:
             raise ValueError(
                 "only site- or user-declared policy can be a hard constraint"
             )
+        if not isinstance(self.applicability, PolicyApplicability):
+            raise ValueError("policy applicability must use the typed scope model")
         if self.content_digest is not None and not re.fullmatch(
             r"sha256:[0-9a-f]{64}", self.content_digest
         ):
             raise ValueError("content digest must use canonical sha256:<hex> form")
+        for item, label, maximum in (
+            (self.id, "policy ID", 128),
+            (self.site_id, "policy site ID", 128),
+            (self.subject, "policy subject", 256),
+            (self.property, "policy property", 256),
+            (self.source_identity, "policy source identity", 512),
+            (self.created_at, "policy creation time", 128),
+            (self.source_identifier, "policy source identifier", 2048),
+            (self.source_url, "policy source URL", 2048),
+            (self.retrieved_at, "policy retrieval time", 128),
+            (self.document_date, "policy document date", 128),
+        ):
+            if item is not None and (
+                len(item) > maximum or any(character in item for character in "\r\n\0")
+            ):
+                raise ValueError(f"{label} is invalid or too long")
+        _validate_policy_value(self.value)
+        try:
+            encoded_value = json.dumps(
+                self.value, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+        except (RecursionError, TypeError, ValueError) as error:
+            raise ValueError("policy value must be structured JSON data") from error
+        if len(encoded_value.encode("utf-8")) > 16_384:
+            raise ValueError("policy value exceeds the 16 KiB structured-data limit")
 
     @property
     def is_hard(self) -> bool:
@@ -161,4 +223,30 @@ class SitePolicyClaim:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "SitePolicyClaim":
-        return cls(**value)
+        document = dict(value)
+        applicability = document.get("applicability")
+        if isinstance(applicability, dict):
+            document["applicability"] = PolicyApplicability.from_dict(applicability)
+        return cls(**document)
+
+
+def _validate_policy_value(value: Any, depth: int = 0) -> None:
+    if depth > 8:
+        raise ValueError("policy value exceeds the structured-data depth limit")
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return
+    if isinstance(value, list):
+        if len(value) > 256:
+            raise ValueError("policy value exceeds the structured-data item limit")
+        for item in value:
+            _validate_policy_value(item, depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > 256 or not all(
+            isinstance(key, str) and len(key) <= 256 for key in value
+        ):
+            raise ValueError("policy value has invalid or excessive structured keys")
+        for item in value.values():
+            _validate_policy_value(item, depth + 1)
+        return
+    raise ValueError("policy value must contain only structured JSON data")

@@ -3,15 +3,21 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from bourneprov.cli import main
 from bourneprov.ids import new_ulid
+from bourneprov.inventory_storage import InventoryStore
 from bourneprov.site_models import Site
+from bourneprov.site_service import SiteService
 from bourneprov.workload import utc_now
+from tests.test_v07_planning import provider_document
+from tests.v04_fixtures import inventory_snapshot
 
 
 class SiteCLITests(unittest.TestCase):
@@ -94,6 +100,76 @@ class SiteCLITests(unittest.TestCase):
                     main(["site", "add", "other", "--remote-root", "/work"]),
                     2,
                 )
+
+    def test_cli_selection_generates_real_shapes_and_materializes_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            site_service = SiteService(database)
+            site = site_service.add_site(
+                "real-shapes", scheduler_hint="slurm",
+                local_project_root=str(root),
+            )
+            snapshot = inventory_snapshot(
+                root, scheduler_families=("slurm",),
+                executable=Path(sys.executable).name,
+            )
+            target = replace(
+                snapshot.execution_targets[0],
+                authorization="observed-authorized",
+            )
+            snapshot = replace(
+                snapshot, site_label=site.name,
+                targets=[snapshot.current_target, target],
+            )
+            InventoryStore(database).save(snapshot)
+            site_service.sites.link_inventory(site.id, snapshot.id)
+            case = root / "case.json"
+            original = b'{"decomposition":{"x":1,"y":1},"science":42}\n'
+            case.write_bytes(original)
+            provider = provider_document()
+            provider["environment_requirements"] = []
+            provider["launcher_requirements"] = []
+            provider_path = root / "provider.json"
+            provider_path.write_text(json.dumps(provider), encoding="utf-8")
+            base_arguments = [
+                "plan", "--site", site.id, "--snapshot", snapshot.id,
+                "--provider", str(provider_path), "--input", "case.json",
+                "--backend", "slurm", "--json",
+                sys.executable, "case.json",
+            ]
+            environment = {"BOURNE_DB": str(database)}
+            output = io.StringIO()
+            with patch.dict("os.environ", environment, clear=False), patch(
+                "bourneprov.cli.Path.cwd", return_value=root
+            ), contextlib.redirect_stdout(output):
+                explored_code = main(base_arguments)
+            explored = json.loads(output.getvalue())
+            candidate = next(
+                item for item in explored["exploration"]["candidates"]
+                if item["state"] == "viable"
+                and item["parameters"] == {"px": 2, "py": 2}
+            )
+            output = io.StringIO()
+            selected_arguments = [
+                *base_arguments[:1],
+                "--candidate", candidate["id"],
+                "--trust-provider-classifications",
+                *base_arguments[1:],
+            ]
+            with patch.dict("os.environ", environment, clear=False), patch(
+                "bourneprov.cli.Path.cwd", return_value=root
+            ), contextlib.redirect_stdout(output):
+                selected_code = main(selected_arguments)
+            plan = json.loads(output.getvalue())
+            original_after = case.read_bytes()
+
+        self.assertEqual(explored_code, 2)
+        self.assertEqual(candidate["resource_shape"]["mpi_ranks"], 4)
+        self.assertEqual(selected_code, 0)
+        self.assertIsNotNone(plan["workload_variant_id"])
+        self.assertNotEqual(plan["arguments"][-1], "case.json")
+        self.assertEqual(original_after, original)
 
 
 if __name__ == "__main__":

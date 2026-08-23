@@ -256,6 +256,41 @@ class DeclarativeConstraintProvider:
         except StopIteration:
             raise ProviderContractError(f"unknown provider parameter: {name}") from None
 
+    def resource_value_hints(self, limit: int = 64) -> dict[str, tuple[int, ...]]:
+        """Derive bounded concrete resource values from hard equality contracts.
+
+        These are candidate-generation hints, not authorization.  Only an equality
+        with exactly one direct resource reference and a resource-independent peer
+        expression can contribute a value.
+        """
+
+        assignments, _ = self.parameter_assignments(limit)
+        hints: dict[str, set[int]] = {}
+        empty_shape = ResourceShape()
+        for constraint in self.constraints:
+            if not constraint.hard or constraint.operator != "equal":
+                continue
+            for resource_expression, value_expression in (
+                (constraint.left, constraint.right),
+                (constraint.right, constraint.left),
+            ):
+                resource_name = _direct_resource(resource_expression)
+                if resource_name is None or _expression_resources(value_expression):
+                    continue
+                for assignment in assignments:
+                    value = _evaluate_expression(value_expression, assignment, empty_shape)
+                    if (
+                        value is not _UNKNOWN
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and (value > 0 or resource_name in {"gpus", "gpus_per_node"})
+                    ):
+                        hints.setdefault(resource_name, set()).add(value)
+        return {
+            name: tuple(sorted(values))
+            for name, values in sorted(hints.items())
+        }
+
 
 class TrustedCodeProvider(Protocol):
     """Version-1 trusted extension contract; implementations are not sandboxed."""
@@ -305,20 +340,32 @@ def automatic_change_allowed(
     *,
     explicit_user_declaration: bool = False,
     explicit_change_approval: bool = False,
+    trusted_provider_contract: bool = False,
 ) -> bool:
     """Enforce semantic safety without changing a parameter's classification."""
 
     evidence_kind = parameter.classification_evidence.get("kind")
+    if explicit_change_approval:
+        return True
     if parameter.classification == "execution_only":
-        return explicit_user_declaration or evidence_kind in {
-            "provider_contract", "machine_contract", "user_declared"
-        }
+        return (
+            explicit_user_declaration
+            or (
+                trusted_provider_contract
+                and evidence_kind in {
+                    "provider_contract", "machine_contract", "user_declared"
+                }
+            )
+        )
     if parameter.classification == "performance_tunable":
         return (
             parameter.scientific_equivalence
-            and evidence_kind in {"provider_contract", "machine_contract"}
+            and trusted_provider_contract
+            and evidence_kind in {
+                "provider_contract", "machine_contract", "user_declared"
+            }
         )
-    return explicit_change_approval
+    return False
 
 
 def ensure_remote_provider_available(
@@ -424,6 +471,23 @@ def _expression_parameters(value: dict[str, Any]) -> set[str]:
             result.update(_expression_parameters(item))
         return result
     return set()
+
+
+def _expression_resources(value: dict[str, Any]) -> set[str]:
+    key, operand = next(iter(value.items()))
+    if key == "resource":
+        return {operand}
+    if key in {"add", "multiply", "subtract"}:
+        result: set[str] = set()
+        for item in operand:
+            result.update(_expression_resources(item))
+        return result
+    return set()
+
+
+def _direct_resource(value: dict[str, Any]) -> str | None:
+    key, operand = next(iter(value.items()))
+    return operand if key == "resource" else None
 
 
 def _validate_binding(value: Any) -> None:

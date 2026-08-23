@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict
+import itertools
+import re
 from typing import Any, Iterable, Sequence
 
 from .constraint_providers import DeclarativeConstraintProvider
@@ -65,6 +67,297 @@ def resource_shapes_from_inventory(snapshot: InventorySnapshot) -> list[Resource
             except (TypeError, ValueError):
                 continue
     return sorted(shapes, key=lambda item: item.identity)
+
+
+def generate_resource_shapes(
+    snapshot: InventorySnapshot,
+    workload: WorkloadSpec,
+    *,
+    provider: DeclarativeConstraintProvider | None = None,
+    policy_claims: Sequence[SitePolicyClaim] = (),
+    limit: int = DEFAULT_CANDIDATE_LIMIT,
+) -> list[ResourceShape]:
+    """Generate bounded request shapes from observed capacity and explicit intent.
+
+    Visible node counts are deliberately absent from the generation inputs: they
+    describe a discovery surface, not authorization or a permitted allocation.
+    """
+
+    if limit < 1 or limit > DEFAULT_CANDIDATE_LIMIT:
+        raise ValueError(f"shape limit must be between 1 and {DEFAULT_CANDIDATE_LIMIT}")
+    hints = {} if provider is None else provider.resource_value_hints(limit)
+    per_target: list[list[ResourceShape]] = []
+    for target in sorted(snapshot.execution_targets, key=lambda item: item.id):
+        raw_shapes = target.metadata.get("resource_shapes")
+        generated: list[ResourceShape] = []
+        if isinstance(raw_shapes, list):
+            for raw in raw_shapes[:limit]:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    provisional = ResourceShape.from_dict(raw)
+                    generated.append(
+                        _shape_with_target_evidence(
+                            provisional, target, policy_claims
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+        elif target.metadata.get("scheduler") in {"slurm", "pbs"}:
+            generated.extend(
+                _generated_target_shapes(target, workload, hints, policy_claims, limit)
+            )
+        if generated:
+            by_identity = {shape.identity: shape for shape in generated}
+            per_target.append([by_identity[key] for key in sorted(by_identity)])
+
+    # Deterministic round-robin prevents one scheduler target from consuming the
+    # entire shape budget.
+    shapes: list[ResourceShape] = []
+    for layer in itertools.zip_longest(*per_target):
+        for shape in layer:
+            if shape is not None:
+                shapes.append(shape)
+                if len(shapes) == limit:
+                    return shapes
+    return shapes
+
+
+def policy_applies(claim: SitePolicyClaim, shape: ResourceShape) -> bool:
+    """Return whether a typed policy scope applies to a candidate shape."""
+
+    scope = claim.applicability.scope
+    value = claim.applicability.value
+    if scope == "global":
+        return True
+    if scope in {"scheduler_class", "queue", "partition"}:
+        return shape.scheduler_class == value
+    if scope == "node_class":
+        return shape.node_class == value
+    if scope == "account":
+        return shape.placement.get("account") == value
+    return False
+
+
+def _generated_target_shapes(
+    target: Any,
+    workload: WorkloadSpec,
+    hints: dict[str, tuple[int, ...]],
+    policy_claims: Sequence[SitePolicyClaim],
+    limit: int,
+) -> list[ResourceShape]:
+    metadata = target.metadata
+    scheduler = metadata["scheduler"]
+    requested = workload.resources
+    node_values = _dimension_values(requested.nodes, hints.get("nodes"), (1,))
+    rank_values: tuple[int | None, ...] = _optional_dimension_values(
+        requested.mpi_ranks, hints.get("mpi_ranks")
+    )
+    hinted_cpus = hints.get("total_cpus")
+    generated: list[ResourceShape] = []
+    capacity = _target_capacity(metadata, scheduler)
+    for nodes, mpi_ranks in itertools.product(node_values, rank_values):
+        if requested.cpus is not None:
+            cpu_values = (requested.cpus,)
+        elif hinted_cpus:
+            cpu_values = hinted_cpus
+        elif mpi_ranks is not None:
+            cpu_values = (mpi_ranks,)
+        else:
+            cpu_values = (nodes,)
+        for total_cpus in cpu_values:
+            if total_cpus % nodes or (mpi_ranks is not None and mpi_ranks % nodes):
+                continue
+            if mpi_ranks is not None and total_cpus % mpi_ranks:
+                continue
+            gpus = requested.gpus
+            if gpus is not None and gpus % nodes:
+                continue
+            memory = requested.memory_bytes
+            if memory is not None and memory % nodes:
+                continue
+            shape = ResourceShape(
+                nodes=nodes,
+                cpus_per_node=total_cpus // nodes,
+                total_cpus=total_cpus,
+                mpi_ranks=mpi_ranks,
+                ranks_per_node=None if mpi_ranks is None else mpi_ranks // nodes,
+                threads_per_rank=(
+                    None if mpi_ranks is None else total_cpus // mpi_ranks
+                ),
+                gpus=gpus,
+                gpus_per_node=None if gpus is None else gpus // nodes,
+                memory_bytes=memory,
+                memory_per_node_bytes=None if memory is None else memory // nodes,
+                architecture=_bounded_metadata_string(metadata.get("architecture")),
+                node_class=_bounded_metadata_string(metadata.get("node_class")),
+                walltime_seconds=requested.walltime_seconds,
+                scheduler_class=target.name,
+                placement={
+                    "target_id": target.id,
+                    "scheduler": scheduler,
+                },
+                evidence=[],
+            )
+            if not _within_observed_capacity(shape, capacity):
+                continue
+            capacity_evidence = {
+                "kind": "observed_now",
+                "scope": "scheduler_target_capacity",
+                "target_id": target.id,
+                "capacity": capacity,
+            }
+            shape = ResourceShape.from_dict(
+                {**shape.to_dict(), "evidence": [capacity_evidence]}
+            )
+            generated.append(_shape_with_target_evidence(shape, target, policy_claims))
+            if len(generated) == limit:
+                return generated
+    return generated
+
+
+def _shape_with_target_evidence(
+    shape: ResourceShape,
+    target: Any,
+    policy_claims: Sequence[SitePolicyClaim],
+) -> ResourceShape:
+    evidence = list(shape.evidence)
+    evidence.append(
+        {
+            "kind": "observed_now",
+            "scope": "remote_login_scheduler_surface",
+            "target_id": target.id,
+            "visibility": target.visible,
+            "authorization": target.authorization,
+        }
+    )
+    provisional = ResourceShape.from_dict({**shape.to_dict(), "evidence": evidence})
+    for claim in policy_claims:
+        if (
+            claim.property in {"authorization", "authorized"}
+            and claim.evidence_kind in {"site_declared", "user_declared"}
+            and policy_applies(claim, provisional)
+        ):
+            authorization = _authorization_claim_value(claim.value)
+            if authorization is not None:
+                evidence.append(
+                    {
+                        "kind": claim.evidence_kind,
+                        "scope": "authorization_claim",
+                        "claim_id": claim.id,
+                        "authorization": authorization,
+                    }
+                )
+    return ResourceShape.from_dict({**shape.to_dict(), "evidence": evidence})
+
+
+def _authorization_claim_value(value: Any) -> str | None:
+    if value is True or (
+        isinstance(value, str)
+        and value in {"authorized", "user-declared-authorized"}
+    ):
+        return "user-declared-authorized"
+    if value is False or (
+        isinstance(value, str)
+        and value in {"denied", "unauthorized", "observed-unauthorized"}
+    ):
+        return "unauthorized"
+    return None
+
+
+def _dimension_values(
+    requested: int | None,
+    hinted: tuple[int, ...] | None,
+    default: tuple[int, ...],
+) -> tuple[int, ...]:
+    if requested is not None:
+        return (requested,)
+    return hinted or default
+
+
+def _optional_dimension_values(
+    requested: int | None, hinted: tuple[int, ...] | None
+) -> tuple[int | None, ...]:
+    if requested is not None:
+        return (requested,)
+    return hinted or (None,)
+
+
+def _target_capacity(metadata: dict[str, Any], scheduler: str) -> dict[str, int]:
+    capacity: dict[str, int] = {}
+    if scheduler == "slurm":
+        for source, destination in (
+            ("cpus_per_node", "cpus_per_node"),
+            ("memory_per_node", "memory_per_node_bytes"),
+        ):
+            value = _positive_int(metadata.get(source))
+            if value is not None:
+                capacity[destination] = (
+                    value * 1024 * 1024 if source == "memory_per_node" else value
+                )
+        gpu_count = _gpu_count(metadata.get("generic_resources"))
+        if gpu_count is not None:
+            capacity["gpus_per_node"] = gpu_count
+        walltime = _duration_seconds(metadata.get("wall_time_limit"))
+        if walltime is not None:
+            capacity["walltime_seconds"] = walltime
+    else:
+        ncpus = _positive_int(metadata.get("resources_max.ncpus"))
+        if ncpus is not None:
+            capacity["total_cpus"] = ncpus
+        memory = _memory_bytes(metadata.get("resources_max.mem"))
+        if memory is not None:
+            capacity["memory_bytes"] = memory
+        walltime = _duration_seconds(metadata.get("resources_max.walltime"))
+        if walltime is not None:
+            capacity["walltime_seconds"] = walltime
+    return capacity
+
+
+def _within_observed_capacity(shape: ResourceShape, capacity: dict[str, int]) -> bool:
+    return all(
+        getattr(shape, name) is None or getattr(shape, name) <= maximum
+        for name, maximum in capacity.items()
+    )
+
+
+def _gpu_count(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    counts = [int(item) for item in re.findall(r"(?:^|,)gpu(?::[^,:]+)*:(\d+)", value)]
+    return max(counts) if counts else None
+
+
+def _memory_bytes(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\s*(\d+)\s*([kmgt]?)(?:i?b)?\s*", value, re.IGNORECASE)
+    if match is None:
+        return None
+    power = {"": 0, "k": 1, "m": 2, "g": 3, "t": 4}[match.group(2).lower()]
+    return int(match.group(1)) * (1024 ** power)
+
+
+def _duration_seconds(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if not isinstance(value, str) or value.lower() in {"infinite", "unlimited", "--"}:
+        return None
+    match = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d+)(?::(\d+))?", value.strip())
+    if match is None:
+        return None
+    days = int(match.group(1) or 0)
+    if match.group(4) is None:
+        hours, minutes, seconds = 0, int(match.group(2)), int(match.group(3))
+    else:
+        hours, minutes, seconds = map(int, match.group(2, 3, 4))
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _bounded_metadata_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and 0 < len(value) <= 256 else None
 
 
 def _positive_int(value: object) -> int | None:
@@ -140,7 +433,7 @@ def explore_candidates(
     policy_claims: Sequence[SitePolicyClaim] = (),
     limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> CandidateExploration:
-    """Combine shapes, environments, policy, and typed constraints under a hard cap."""
+    """Combine inputs with hard pruning and fair bounded group enumeration."""
 
     if limit < 1 or limit > DEFAULT_CANDIDATE_LIMIT:
         raise ValueError(f"candidate limit must be between 1 and {DEFAULT_CANDIDATE_LIMIT}")
@@ -154,111 +447,193 @@ def explore_candidates(
         assignments, assignment_count = provider.parameter_assignments(limit)
     theoretical = len(shapes) * len(envs) * assignment_count
     candidates: list[PlanningCandidate] = []
+    groups = [(shape, environment) for shape in shapes for environment in envs]
+    expandable: list[tuple[ResourceShape, ResolvedEnvironment | None]] = []
+    hard_groups: list[tuple[ResourceShape, ResolvedEnvironment | None]] = []
+    hard_pruned = 0
+    explored_groups: set[tuple[str, str | None]] = set()
 
-    for shape in shapes:
-        for environment in envs:
-            for parameters in assignments:
-                if len(candidates) >= limit:
-                    break
-                reasons: list[CandidateReason] = []
-                unresolved: list[str] = []
-                state = "viable"
-                authorization_reasons, authorization_state = _authorization(shape)
-                reasons.extend(authorization_reasons)
-                if authorization_state == "hard_invalid":
-                    state = "hard_invalid"
-                elif authorization_state == "unresolved":
-                    state = "unresolved"
-                    unresolved.extend(item.message for item in authorization_reasons)
-                requirement_reasons = _resource_requirements(workload.resources, shape)
-                reasons.extend(requirement_reasons)
-                if any(item.code == "resource_incompatible" for item in requirement_reasons):
-                    state = "hard_invalid"
-                elif any(item.code == "resource_unknown" for item in requirement_reasons):
-                    if state == "viable":
-                        state = "unresolved"
-                    unresolved.extend(
-                        item.message for item in requirement_reasons
-                        if item.code == "resource_unknown"
-                    )
+    for shape, environment in groups:
+        if _group_is_hard_invalid(
+            workload, shape, environment, provider, policy_claims
+        ):
+            hard_groups.append((shape, environment))
+            hard_pruned += assignment_count
+            explored_groups.add(
+                (shape.identity, None if environment is None else environment.context_id)
+            )
+        else:
+            expandable.append((shape, environment))
 
-                policy_reasons, policy_state = _policy(shape, policy_claims)
-                reasons.extend(policy_reasons)
-                if policy_state == "policy_incompatible":
-                    state = policy_state
-                elif policy_state == "unresolved":
-                    if state == "viable":
-                        state = "unresolved"
-                    unresolved.extend(
-                        item.message for item in policy_reasons
-                        if item.code == "policy_unknown"
-                    )
-
-                if environment is None:
-                    if provider is not None and provider.environment_requirements:
-                        state = "unresolved" if state == "viable" else state
-                        unresolved.append("no existing environment was resolved")
-                elif not environment.is_compatible:
-                    state = "unresolved" if state == "viable" else state
-                    unresolved.extend(environment.unresolved)
-
-                if provider is not None:
-                    evaluations = provider.evaluate(parameters, shape)
-                    for item in evaluations:
-                        if item.state == "violated" and item.hard:
-                            reasons.append(
-                                CandidateReason(
-                                    "constraint_violated", item.message,
-                                    "provider_contract", (item.constraint_id,),
-                                )
-                            )
-                            state = "hard_invalid"
-                        elif item.state == "unknown":
-                            reasons.append(
-                                CandidateReason(
-                                    "constraint_unknown", item.message,
-                                    "unknown", (item.constraint_id,),
-                                )
-                            )
-                            if state == "viable":
-                                state = "unresolved"
-                            unresolved.append(item.message)
-
-                candidate_value = {
-                    "resource_shape": shape.to_dict(),
-                    "environment": None if environment is None else environment.to_dict(),
-                    "parameters": parameters,
-                }
-                candidates.append(
-                    PlanningCandidate(
-                        id=canonical_digest(candidate_value),
-                        resource_shape=shape,
-                        environment=environment,
-                        parameters=dict(parameters),
-                        state=state,
-                        reasons=reasons,
-                        unresolved=sorted(set(unresolved)),
-                    )
-                )
+    # One assignment layer per group gives every viable shape/environment group
+    # an opportunity before any group receives its next combination.
+    for assignment_index in range(len(assignments)):
+        for shape, environment in expandable:
             if len(candidates) >= limit:
                 break
+            candidates.append(
+                _evaluate_candidate(
+                    workload, shape, environment, assignments[assignment_index],
+                    provider, policy_claims,
+                )
+            )
+            explored_groups.add(
+                (shape.identity, None if environment is None else environment.context_id)
+            )
         if len(candidates) >= limit:
             break
+
+    # Keep a bounded diagnostic representative for cheaply-pruned groups only
+    # after expandable groups have received fair exploration.
+    representative = assignments[0] if assignments else {}
+    for shape, environment in hard_groups:
+        if len(candidates) >= limit:
+            break
+        candidates.append(
+            _evaluate_candidate(
+                workload, shape, environment, representative, provider, policy_claims
+            )
+        )
+        hard_pruned -= 1
 
     hard_invalid = sum(
         item.state in {"hard_invalid", "policy_incompatible"} for item in candidates
     )
     viable = sum(item.state == "viable" for item in candidates)
-    truncated = theoretical > len(candidates)
-    coverage = (
-        f"materialized {len(candidates)} of {theoretical} deterministic combinations"
-        if truncated
-        else f"materialized all {len(candidates)} deterministic combinations"
-    )
+    considered = len(candidates) + hard_pruned
+    truncated = theoretical > considered
+    if truncated:
+        coverage = (
+            f"explored a bounded subset: materialized {len(candidates)} and "
+            f"hard-pruned {hard_pruned} of {theoretical} deterministic combinations "
+            f"across {len(explored_groups)} of {len(groups)} shape/environment groups; "
+            "viable and rejection counts describe only that explored subset and do not "
+            "establish global absence of viable candidates"
+        )
+    else:
+        coverage = (
+            f"explored all {theoretical} deterministic combinations: materialized "
+            f"{len(candidates)} and hard-pruned {hard_pruned} across {len(groups)} "
+            "shape/environment groups"
+        )
     return CandidateExploration(
         candidates=candidates, generated_count=len(candidates),
         theoretical_count=theoretical, hard_invalid_count=hard_invalid,
         viable_count=viable, truncated=truncated, coverage=coverage,
+        hard_pruned_count=hard_pruned,
+        explored_group_count=len(explored_groups), total_group_count=len(groups),
+    )
+
+
+def _group_is_hard_invalid(
+    workload: WorkloadSpec,
+    shape: ResourceShape,
+    environment: ResolvedEnvironment | None,
+    provider: DeclarativeConstraintProvider | None,
+    policy_claims: Sequence[SitePolicyClaim],
+) -> bool:
+    _, authorization_state = _authorization(shape)
+    if authorization_state == "hard_invalid":
+        return True
+    if any(
+        item.code == "resource_incompatible"
+        for item in _resource_requirements(workload.resources, shape)
+    ):
+        return True
+    _, policy_state = _policy(shape, policy_claims)
+    if policy_state == "policy_incompatible":
+        return True
+    if provider is not None:
+        # Parameter-dependent constraints remain unknown here. A hard violation
+        # at this stage is therefore shape-only and safely prunes the full group.
+        if any(
+            item.state == "violated" and item.hard
+            for item in provider.evaluate({}, shape)
+        ):
+            return True
+    return False
+
+
+def _evaluate_candidate(
+    workload: WorkloadSpec,
+    shape: ResourceShape,
+    environment: ResolvedEnvironment | None,
+    parameters: dict[str, Any],
+    provider: DeclarativeConstraintProvider | None,
+    policy_claims: Sequence[SitePolicyClaim],
+) -> PlanningCandidate:
+    reasons: list[CandidateReason] = []
+    unresolved: list[str] = []
+    state = "viable"
+    authorization_reasons, authorization_state = _authorization(shape)
+    reasons.extend(authorization_reasons)
+    if authorization_state == "hard_invalid":
+        state = "hard_invalid"
+    elif authorization_state == "unresolved":
+        state = "unresolved"
+        unresolved.extend(item.message for item in authorization_reasons)
+    requirement_reasons = _resource_requirements(workload.resources, shape)
+    reasons.extend(requirement_reasons)
+    if any(item.code == "resource_incompatible" for item in requirement_reasons):
+        state = "hard_invalid"
+    elif any(item.code == "resource_unknown" for item in requirement_reasons):
+        if state == "viable":
+            state = "unresolved"
+        unresolved.extend(
+            item.message for item in requirement_reasons
+            if item.code == "resource_unknown"
+        )
+
+    policy_reasons, policy_state = _policy(shape, policy_claims)
+    reasons.extend(policy_reasons)
+    if policy_state == "policy_incompatible" and state != "hard_invalid":
+        state = policy_state
+    elif policy_state == "unresolved":
+        if state == "viable":
+            state = "unresolved"
+        unresolved.extend(
+            item.message for item in policy_reasons
+            if item.code == "policy_unknown"
+        )
+
+    if environment is None:
+        if provider is not None and provider.environment_requirements:
+            state = "unresolved" if state == "viable" else state
+            unresolved.append("no existing environment was resolved")
+    elif not environment.is_compatible:
+        state = "unresolved" if state == "viable" else state
+        unresolved.extend(environment.unresolved)
+
+    if provider is not None:
+        for item in provider.evaluate(parameters, shape):
+            if item.state == "violated" and item.hard:
+                reasons.append(
+                    CandidateReason(
+                        "constraint_violated", item.message,
+                        "provider_contract", (item.constraint_id,),
+                    )
+                )
+                state = "hard_invalid"
+            elif item.state == "unknown":
+                reasons.append(
+                    CandidateReason(
+                        "constraint_unknown", item.message,
+                        "unknown", (item.constraint_id,),
+                    )
+                )
+                if state == "viable":
+                    state = "unresolved"
+                unresolved.append(item.message)
+
+    candidate_value = {
+        "resource_shape": shape.to_dict(),
+        "environment": None if environment is None else environment.to_dict(),
+        "parameters": parameters,
+    }
+    return PlanningCandidate(
+        id=canonical_digest(candidate_value), resource_shape=shape,
+        environment=environment, parameters=dict(parameters), state=state,
+        reasons=reasons, unresolved=sorted(set(unresolved)),
     )
 
 
@@ -319,23 +694,30 @@ def _authorization(
     shape: ResourceShape,
 ) -> tuple[list[CandidateReason], str]:
     values = [
-        item.get("authorization")
+        (item.get("authorization"), item.get("kind", "unknown"))
         for item in shape.evidence
         if isinstance(item, dict) and "authorization" in item
     ]
-    if any(value in {"denied", "unauthorized", "observed-unauthorized"} for value in values):
+    denied = next(
+        (
+            (value, kind) for value, kind in values
+            if value in {"denied", "unauthorized", "observed-unauthorized"}
+        ),
+        None,
+    )
+    if denied is not None:
         return [
             CandidateReason(
                 "authorization_incompatible",
                 "resource visibility does not grant authorization for this shape",
-                "observed_now",
+                denied[1],
             )
         ], "hard_invalid"
     if any(
         value in {
             "authorized", "observed-authorized", "user-declared-authorized"
         }
-        for value in values
+        for value, _ in values
     ):
         return [], "viable"
     return [
@@ -362,47 +744,60 @@ def _policy(
     state = "viable"
     grouped: dict[str, list[SitePolicyClaim]] = {}
     for claim in claims:
-        if claim.is_hard and claim.property in _POLICY_PROPERTIES:
+        if (
+            claim.is_hard
+            and claim.property in _POLICY_PROPERTIES
+            and policy_applies(claim, shape)
+        ):
             grouped.setdefault(claim.property, []).append(claim)
     for property_name, items in grouped.items():
-        raw_values = [item.value for item in items]
-        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in raw_values):
-            result.append(
+        invalid = [
+            item for item in items
+            if not isinstance(item.value, (int, float)) or isinstance(item.value, bool)
+        ]
+        if invalid:
+            result.extend(
                 CandidateReason(
                     "policy_unknown", f"hard policy {property_name} is not numeric",
-                    "unknown", tuple(item.id for item in items),
+                    item.evidence_kind, (item.id,),
                 )
+                for item in invalid
             )
             if state == "viable":
                 state = "unresolved"
             continue
+        raw_values = [item.value for item in items]
         dimension = _POLICY_PROPERTIES[property_name]
         requested = getattr(shape, dimension)
         if requested is None:
-            result.append(
+            result.extend(
                 CandidateReason(
                     "policy_unknown", f"{dimension} is unknown under hard policy",
-                    "unknown", tuple(item.id for item in items),
+                    item.evidence_kind, (item.id,),
                 )
+                for item in items
             )
             if state == "viable":
                 state = "unresolved"
             continue
         if requested > min(raw_values):
             state = "policy_incompatible"
-            result.append(
+            result.extend(
                 CandidateReason(
                     "policy_incompatible",
-                    f"{dimension} {requested} is not justified under every credible hard {property_name} interpretation",
-                    "site_declared", tuple(item.id for item in items),
+                    f"{dimension} {requested} exceeds applicable hard {property_name}={item.value}",
+                    item.evidence_kind, (item.id,),
                 )
+                for item in items
+                if requested > item.value
             )
         elif len(set(raw_values)) > 1:
-            result.append(
+            result.extend(
                 CandidateReason(
                     "policy_conflict_preserved",
                     f"true {property_name} remains unknown/conflicted; this shape satisfies every current hard interpretation",
-                    "site_declared", tuple(item.id for item in items),
+                    item.evidence_kind, (item.id,),
                 )
+                for item in items
             )
     return result, state

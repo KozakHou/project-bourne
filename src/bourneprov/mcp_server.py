@@ -6,12 +6,12 @@ import logging
 import os
 from collections.abc import Callable
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from . import __version__
 from .agent_interface import AgentInterfaceError, BourneAgentService
@@ -77,6 +77,42 @@ def _provider_input_schema() -> dict[str, Any]:
 DeclarativeProviderDocument = Annotated[
     dict[str, Any], WithJsonSchema(_provider_input_schema())
 ]
+
+BoundedPolicyValue = bool | int | float | Annotated[str, Field(max_length=4096)]
+
+
+class PolicyApplicabilityDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal[
+        "global", "scheduler_class", "queue", "partition", "node_class", "account"
+    ] = "global"
+    value: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+
+
+class SitePolicyClaimDocument(BaseModel):
+    """Bounded structured policy evidence; never a shell or source-document body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: Annotated[str, Field(min_length=1, max_length=256)]
+    property: Annotated[str, Field(min_length=1, max_length=256)]
+    value: BoundedPolicyValue
+    evidence_kind: Literal[
+        "observed_now", "site_declared", "user_declared", "historical", "inferred", "unknown"
+    ]
+    interpretation_status: Literal["hard_constraint", "advisory", "unresolved"]
+    source_identity: Annotated[str, Field(min_length=1, max_length=512)]
+    applicability: PolicyApplicabilityDocument = Field(
+        default_factory=PolicyApplicabilityDocument
+    )
+    source_identifier: Annotated[str, Field(max_length=2048)] | None = None
+    source_url: Annotated[str, Field(max_length=2048)] | None = None
+    retrieved_at: Annotated[str, Field(max_length=128)] | None = None
+    document_date: Annotated[str, Field(max_length=128)] | None = None
+    content_digest: Annotated[
+        str, Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    ] | None = None
 
 
 class ProductError(BaseModel):
@@ -249,6 +285,29 @@ def create_mcp_server(
         )
 
     @server.tool(
+        name="bourne_site_policy_claim",
+        description=(
+            "Persist one bounded structured site-policy claim and provenance. "
+            "This accepts no shell command or source-document content."
+        ),
+        annotations=_annotation(read_only=False, destructive=False),
+        structured_output=True,
+    )
+    async def bourne_site_policy_claim(
+        reference: str,
+        claim: SitePolicyClaimDocument,
+    ) -> ToolResult:
+        return await call(
+            "site_policy_claim",
+            partial(
+                agent.site_policy_claim,
+                reference,
+                claim.model_dump(exclude_none=True),
+            ),
+            mutation=True,
+        )
+
+    @server.tool(
         name="bourne_site_candidates",
         description="Generate bounded ephemeral site-aware plan candidates without executing.",
         annotations=_annotation(read_only=False, destructive=False),
@@ -280,12 +339,18 @@ def create_mcp_server(
         candidate_id: str,
         selection_source: str,
         rationale: str | None = None,
+        variant_approvals: list[str] | None = None,
+        explicit_user_declarations: list[str] | None = None,
+        trusted_provider_contract: bool = False,
     ) -> ToolResult:
         return await call(
             "site_select",
             partial(
                 agent.site_select, request_id, candidate_id,
                 selection_source=selection_source, rationale=rationale,
+                variant_approvals=variant_approvals,
+                explicit_user_declarations=explicit_user_declarations,
+                trusted_provider_contract=trusted_provider_contract,
             ),
             mutation=True,
         )

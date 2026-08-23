@@ -44,6 +44,7 @@ from .workload_storage import (
 )
 from .constraint_providers import DeclarativeConstraintProvider, ProviderContractError
 from .site_service import SitePlanningService, SitePlanningSession, SiteService
+from .site_models import PolicyApplicability
 from .site_storage import SiteNotFound
 
 MAX_WAIT_SECONDS = 7 * 24 * 60 * 60
@@ -156,6 +157,33 @@ class BourneAgentService:
             "summary": _inventory_summary(snapshot),
         }
 
+    def site_policy_claim(
+        self, reference: str, claim: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Submit one typed structured claim; source documents are not accepted."""
+
+        try:
+            applicability_value = claim.get("applicability", {})
+            if not isinstance(applicability_value, Mapping):
+                raise ValueError("policy applicability must be a structured object")
+            applicability = PolicyApplicability.from_dict(dict(applicability_value))
+            saved = self.site_service.submit_policy_claim(
+                reference,
+                subject=claim["subject"], property=claim["property"],
+                value=claim["value"], evidence_kind=claim["evidence_kind"],
+                interpretation_status=claim["interpretation_status"],
+                source_identity=claim["source_identity"],
+                applicability=applicability,
+                source_identifier=claim.get("source_identifier"),
+                source_url=claim.get("source_url"),
+                retrieved_at=claim.get("retrieved_at"),
+                document_date=claim.get("document_date"),
+                content_digest=claim.get("content_digest"),
+            )
+        except (KeyError, SiteNotFound, TypeError, ValueError) as exc:
+            self._raise("invalid_site_policy_claim", "Site policy claim was rejected.", exc)
+        return {"policy_claim": saved.to_dict(), "source_content_stored": False}
+
     def site_candidates(
         self,
         reference: str,
@@ -194,6 +222,9 @@ class BourneAgentService:
         *,
         selection_source: str,
         rationale: str | None = None,
+        variant_approvals: list[str] | None = None,
+        explicit_user_declarations: list[str] | None = None,
+        trusted_provider_contract: bool = False,
     ) -> dict[str, Any]:
         session = self._site_sessions.get(request_id)
         if session is None:
@@ -205,8 +236,13 @@ class BourneAgentService:
             plan = self.site_planning.select(
                 session, candidate_id, selection_source=selection_source,
                 selection_rationale=rationale,
+                variant_approvals={item: True for item in (variant_approvals or [])},
+                explicit_user_declarations={
+                    item: True for item in (explicit_user_declarations or [])
+                },
+                trusted_provider_contract=trusted_provider_contract,
             )
-        except ValueError as exc:
+        except (PermissionError, ProviderContractError, ValueError) as exc:
             self._raise("candidate_selection_failed", "Candidate selection failed.", exc)
         return {"plan": plan.to_dict(), "rationale_is_evidence": False}
 

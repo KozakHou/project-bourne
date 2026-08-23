@@ -106,6 +106,18 @@ def _add_planning_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", metavar="FILE", help="declarative constraint-provider JSON")
     parser.add_argument("--candidate", help="explicit candidate identity to select")
     parser.add_argument("--selection-rationale", help="human/agent rationale (not evidence)")
+    parser.add_argument(
+        "--approve-variant-change", action="append", default=[], metavar="PARAMETER",
+        help="approve one provider-bound semantic input change",
+    )
+    parser.add_argument(
+        "--declare-execution-only", action="append", default=[], metavar="PARAMETER",
+        help="explicitly declare one provider parameter execution-only",
+    )
+    parser.add_argument(
+        "--trust-provider-classifications", action="store_true",
+        help="explicitly trust reviewed provider-contract semantic classifications",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -513,9 +525,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.provider,
                 arguments.candidate,
                 arguments.selection_rationale,
+                *arguments.approve_variant_change,
+                *arguments.declare_execution_only,
+                True if arguments.trust_provider_classifications else None,
             )
         ):
-            parser.error("--provider, --candidate, and --selection-rationale require --site")
+            parser.error("site/provider selection and variant-review flags require --site")
+        if arguments.provider is None and (
+            arguments.approve_variant_change
+            or arguments.declare_execution_only
+            or arguments.trust_provider_classifications
+        ):
+            parser.error("variant-review flags require --provider")
         if (
             arguments.subcommand == "execute"
             and arguments.plan is not None
@@ -633,6 +654,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 plan = site_planner.select(
                     session, candidate_id, selection_source="cli",
                     selection_rationale=arguments.selection_rationale,
+                    variant_approvals={
+                        item: True for item in arguments.approve_variant_change
+                    },
+                    explicit_user_declarations={
+                        item: True for item in arguments.declare_execution_only
+                    },
+                    trusted_provider_contract=arguments.trust_provider_classifications,
                 )
                 if arguments.subcommand == "plan":
                     print(
@@ -645,7 +673,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _print_execution_result(
                     result, arguments.json, execution_store
                 )
-            except (BackendError, PlanningError, RuntimeError, ValueError, OSError) as exc:
+            except (
+                BackendError, PermissionError, PlanningError, RuntimeError,
+                ValueError, OSError,
+            ) as exc:
                 print(f"bourne: {exc}", file=sys.stderr)
                 return 2
         try:

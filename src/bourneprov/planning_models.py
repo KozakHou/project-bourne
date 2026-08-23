@@ -233,6 +233,9 @@ class CandidateExploration:
     viable_count: int
     truncated: bool
     coverage: str
+    hard_pruned_count: int = 0
+    explored_group_count: int = 0
+    total_group_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,6 +255,9 @@ class CandidateSelectionSummary:
     unresolved_conditions: list[str]
     truncated: bool
     coverage: str
+    hard_pruned_count: int = 0
+    explored_group_count: int = 0
+    total_group_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

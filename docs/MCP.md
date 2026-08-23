@@ -102,8 +102,9 @@ The compact tool surface is:
 | `bourne_site_list` | List configured non-secret local and SSH sites. |
 | `bourne_site_inspect` | Inspect one site, policy claims, and inventory identities. |
 | `bourne_site_discover` | Run one bounded typed discovery operation at a configured site. |
+| `bourne_site_policy_claim` | Persist one bounded structured policy claim and provenance; accepts no shell or source-document content. |
 | `bourne_site_candidates` | Produce a bounded ephemeral candidate set without executing. |
-| `bourne_site_select` | Persist the bounded selection summary and materialize one chosen plan. |
+| `bourne_site_select` | Persist the bounded selection summary and materialize one chosen plan, including any reviewed provider-bound JSON variant. |
 | `bourne_plan` | Persist intent/workload and resolve against one existing inventory; never execute. |
 | `bourne_execute_plan` | Execute one existing immutable plan without altering it. |
 | `bourne_execution_get` | Read request, plan, lifecycle, scheduler, allocation, experiment, telemetry, and verification state. |

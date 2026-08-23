@@ -29,6 +29,7 @@ def materialize_json_variant(
     proposer: str,
     approvals: Mapping[str, bool] | None = None,
     explicit_user_declarations: Mapping[str, bool] | None = None,
+    trusted_provider_contract: bool = False,
 ) -> WorkloadVariant:
     """Create an independent derived JSON input; the source is never written."""
 
@@ -60,6 +61,7 @@ def materialize_json_variant(
             parameter,
             explicit_user_declaration=declarations.get(name, False),
             explicit_change_approval=approved,
+            trusted_provider_contract=trusted_provider_contract,
         ):
             raise PermissionError(
                 f"parameter '{name}' ({parameter.classification}) is not approved for this change"
@@ -91,9 +93,48 @@ def materialize_json_variant(
         approval={
             "specific_change_approvals": approvals,
             "explicit_user_declarations": declarations,
+            "trusted_provider_contract": trusted_provider_contract,
             "classification_unchanged": True,
         },
     )
+
+
+def candidate_variant_changes(
+    original: Path,
+    parameters: Mapping[str, Any],
+    provider: DeclarativeConstraintProvider,
+) -> dict[str, Any]:
+    """Return only provider-bound candidate values that change the JSON input."""
+
+    raw = original.read_bytes()
+    if len(raw) > MAX_VARIANT_INPUT_BYTES:
+        raise ValueError("variant source exceeds the size limit")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"variant source is not valid UTF-8 JSON: {exc}") from exc
+    changes: dict[str, Any] = {}
+    for name in sorted(parameters):
+        parameter = provider.parameter(name)
+        if parameter.binding is None:
+            continue
+        if Path(parameter.binding["input"]).name != original.name:
+            continue
+        if _lookup(value, parameter.binding["path"]) != parameters[name]:
+            changes[name] = parameters[name]
+    return changes
+
+
+def _lookup(document: Any, path: list[Any]) -> Any:
+    current = document
+    for component in path:
+        if isinstance(component, int):
+            if not isinstance(current, list) or not 0 <= component < len(current):
+                raise ProviderContractError("variant binding index does not exist")
+        elif not isinstance(current, dict) or component not in current:
+            raise ProviderContractError("variant binding key does not exist")
+        current = current[component]
+    return current
 
 
 def _replace(document: Any, path: list[Any], replacement: Any) -> Any:

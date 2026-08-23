@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -21,17 +21,18 @@ from .planning_models import (
     WorkloadVariant,
 )
 from .remote_transport import OpenSSHTransport, RemoteWorkerClient
-from .site_models import Site, SitePolicyClaim
+from .site_models import PolicyApplicability, Site, SitePolicyClaim
 from .site_planning import (
     explore_candidates,
+    generate_resource_shapes,
     rejection_reason_summary,
     resolve_environments,
-    resource_shapes_from_inventory,
 )
 from .site_storage import SiteStore
 from .workload import utc_now
-from .workload_models import DecisionEvidence, ExecutionPlan
+from .workload_models import DecisionEvidence, ExecutionPlan, ResourceRequirements
 from .workload_storage import ExecutionStore
+from .variants import candidate_variant_changes, materialize_json_variant
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ class SitePlanningSession:
     inventory_snapshot_id: str
     site_id: str
     exploration: CandidateExploration
+    provider: DeclarativeConstraintProvider | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +60,9 @@ class SitePlanningSession:
                 "viable_count": self.exploration.viable_count,
                 "truncated": self.exploration.truncated,
                 "coverage": self.exploration.coverage,
+                "hard_pruned_count": self.exploration.hard_pruned_count,
+                "explored_group_count": self.exploration.explored_group_count,
+                "total_group_count": self.exploration.total_group_count,
             },
         }
 
@@ -127,6 +134,39 @@ class SiteService:
     def add_policy_claim(self, claim: SitePolicyClaim) -> None:
         self.sites.save_policy_claim(claim)
 
+    def submit_policy_claim(
+        self,
+        site_reference: str,
+        *,
+        subject: str,
+        property: str,
+        value: Any,
+        evidence_kind: str,
+        interpretation_status: str,
+        source_identity: str,
+        applicability: PolicyApplicability | None = None,
+        source_identifier: str | None = None,
+        source_url: str | None = None,
+        retrieved_at: str | None = None,
+        document_date: str | None = None,
+        content_digest: str | None = None,
+    ) -> SitePolicyClaim:
+        """Persist one bounded structured assertion; no source content is executed."""
+
+        site = self.sites.get(site_reference)
+        claim = SitePolicyClaim(
+            id=new_ulid(), site_id=site.id, subject=subject, property=property,
+            value=value, evidence_kind=evidence_kind,
+            interpretation_status=interpretation_status,
+            source_identity=source_identity, created_at=utc_now(),
+            source_identifier=source_identifier, source_url=source_url,
+            retrieved_at=retrieved_at, document_date=document_date,
+            content_digest=content_digest,
+            applicability=applicability or PolicyApplicability(),
+        )
+        self.sites.save_policy_claim(claim)
+        return claim
+
     def _client(self, site: Site) -> RemoteWorkerClient:
         return self.remote_clients.get(site.id) or RemoteWorkerClient(
             site, OpenSSHTransport()
@@ -137,6 +177,7 @@ class SitePlanningService:
     """Explore ephemerally; persist only the selection summary and selected plan."""
 
     def __init__(self, database_path: Path):
+        self.database_path = database_path
         self.sites = SiteStore(database_path)
         self.inventories = InventoryStore(database_path)
         self.executions = ExecutionStore(database_path)
@@ -158,10 +199,10 @@ class SitePlanningService:
         effective = self._effective_request(request, site)
         workload = request_to_workload(effective)
         self.executions.save_request_with_workload(effective, workload)
-        shapes = list(
-            resource_shapes
-            if resource_shapes is not None
-            else resource_shapes_from_inventory(inventory)
+        policy_claims = self.sites.policy_claims(site.id)
+        shapes = list(resource_shapes) if resource_shapes is not None else generate_resource_shapes(
+            inventory, workload, provider=provider, policy_claims=policy_claims,
+            limit=limit,
         )
         requirements: list[dict[str, Any]] = []
         if provider is not None:
@@ -174,12 +215,13 @@ class SitePlanningService:
         environments = resolve_environments(inventory, requirements)
         exploration = explore_candidates(
             workload, shapes, environments, provider=provider,
-            policy_claims=self.sites.policy_claims(site.id), limit=limit,
+            policy_claims=policy_claims, limit=limit,
         )
         return SitePlanningSession(
             request=effective, workload_id=workload.id,
             inventory_snapshot_id=inventory.id, site_id=site.id,
             exploration=exploration,
+            provider=provider,
         )
 
     def select(
@@ -190,6 +232,9 @@ class SitePlanningService:
         selection_source: str,
         selection_rationale: str | None = None,
         variant: WorkloadVariant | None = None,
+        variant_approvals: Mapping[str, bool] | None = None,
+        explicit_user_declarations: Mapping[str, bool] | None = None,
+        trusted_provider_contract: bool = False,
     ) -> ExecutionPlan:
         if (
             not isinstance(selection_source, str)
@@ -215,6 +260,13 @@ class SitePlanningService:
         workload = self.executions.get_workload(session.workload_id)
         inventory = self.inventories.get(session.inventory_snapshot_id)
         site = self.sites.get(session.site_id)
+        if variant is None and session.provider is not None:
+            variant = self._materialize_selected_variant(
+                session, candidate, session.provider, proposer=selection_source,
+                approvals=variant_approvals,
+                explicit_user_declarations=explicit_user_declarations,
+                trusted_provider_contract=trusted_provider_contract,
+            )
         if variant is not None:
             if variant.workload_id != workload.id:
                 raise ValueError("workload variant does not derive from this workload")
@@ -233,11 +285,16 @@ class SitePlanningService:
             unresolved_conditions=list(candidate.unresolved),
             truncated=session.exploration.truncated,
             coverage=session.exploration.coverage,
+            hard_pruned_count=session.exploration.hard_pruned_count,
+            explored_group_count=session.exploration.explored_group_count,
+            total_group_count=session.exploration.total_group_count,
         )
         self.sites.save_selection(summary)
         planned_workload = workload
         if variant is not None:
-            planned_request = _variant_request(session.request, site, variant)
+            planned_request = _variant_request(
+                session.request, site, variant, candidate.resource_shape
+            )
             planned_workload = request_to_workload(planned_request)
             self.executions.save_request_with_workload(planned_request, planned_workload)
         family, scheduler_id, target_id = _scheduler_selection(
@@ -292,6 +349,52 @@ class SitePlanningService:
         )
         self.executions.save_plan(plan)
         return plan
+
+    def _materialize_selected_variant(
+        self,
+        session: SitePlanningSession,
+        candidate: PlanningCandidate,
+        provider: DeclarativeConstraintProvider,
+        *,
+        proposer: str,
+        approvals: Mapping[str, bool] | None,
+        explicit_user_declarations: Mapping[str, bool] | None,
+        trusted_provider_contract: bool,
+    ) -> WorkloadVariant | None:
+        bound_inputs = {
+            parameter.binding["input"]
+            for parameter in provider.parameters
+            if parameter.name in candidate.parameters and parameter.binding is not None
+        }
+        if not bound_inputs:
+            return None
+        if len(bound_inputs) != 1:
+            raise ValueError(
+                "automatic variant materialization currently requires one bound JSON input"
+            )
+        binding_input = next(iter(bound_inputs))
+        matches: list[Path] = []
+        for value in session.request.artifacts.inputs:
+            candidate_path = Path(value)
+            if candidate_path.name != Path(binding_input).name:
+                continue
+            if not candidate_path.is_absolute():
+                candidate_path = Path(session.request.base_directory) / candidate_path
+            matches.append(candidate_path.resolve(strict=False))
+        if len(matches) != 1:
+            raise ValueError(
+                "provider-bound variant input must match exactly one declared request input"
+            )
+        changes = candidate_variant_changes(matches[0], candidate.parameters, provider)
+        if not changes:
+            return None
+        return materialize_json_variant(
+            session.workload_id, matches[0],
+            self.database_path.resolve(strict=False).parent / "variant-staging",
+            changes, provider, proposer=proposer, approvals=approvals,
+            explicit_user_declarations=explicit_user_declarations,
+            trusted_provider_contract=trusted_provider_contract,
+        )
 
     @staticmethod
     def _effective_request(request: ExecutionRequest, site: Site) -> ExecutionRequest:
@@ -366,7 +469,10 @@ def _scheduler_selection(
 
 
 def _variant_request(
-    request: ExecutionRequest, site: Site, variant: WorkloadVariant
+    request: ExecutionRequest,
+    site: Site,
+    variant: WorkloadVariant,
+    shape: ResourceShape,
 ) -> ExecutionRequest:
     original = Path(variant.original_path).resolve(strict=False)
     if site.kind == "remote_ssh":
@@ -393,9 +499,18 @@ def _variant_request(
     metadata.update(
         {"effective_from_request": request.id, "workload_variant_id": variant.id}
     )
+    resources = ResourceRequirements(
+        cpus=shape.total_cpus,
+        gpus=shape.gpus,
+        nodes=shape.nodes,
+        mpi_ranks=shape.mpi_ranks,
+        memory_bytes=shape.memory_bytes,
+        walltime_seconds=shape.walltime_seconds,
+    )
     return replace(
         request,
         id=new_ulid(), created_at=utc_now(), command=command,
         artifacts=RequestArtifacts(inputs=inputs, outputs=request.artifacts.outputs),
+        resources=resources,
         source=RequestSource(request.source.kind, tuple(sorted(metadata.items()))),
     )

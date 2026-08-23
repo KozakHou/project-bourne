@@ -35,7 +35,6 @@ from bourneprov import remote_worker
 from bourneprov.site_models import Site, SitePolicyClaim
 from bourneprov.site_service import SitePlanningService, SiteService
 from bourneprov.site_storage import SiteStore
-from bourneprov.variants import materialize_json_variant
 from bourneprov.workload import utc_now
 from bourneprov.workload_models import ExecutionConstraints
 from bourneprov.workload_storage import ExecutionStore
@@ -368,21 +367,6 @@ class FakeHPCEndToEndTests(unittest.TestCase):
         target = replace(
             target,
             authorization="observed-authorized",
-            metadata={
-                **target.metadata,
-                "resource_shapes": [
-                    {
-                        "nodes": 1, "cpus_per_node": 4, "total_cpus": 4,
-                        "mpi_ranks": 4, "ranks_per_node": 4,
-                        "scheduler_class": target.name,
-                    },
-                    {
-                        "nodes": 2, "cpus_per_node": 4, "total_cpus": 8,
-                        "mpi_ranks": 8, "ranks_per_node": 4,
-                        "scheduler_class": target.name,
-                    },
-                ],
-            },
         )
         contexts = [
             replace(
@@ -440,15 +424,13 @@ class FakeHPCEndToEndTests(unittest.TestCase):
             if item.state == "viable"
             and item.parameters == {"px": 2, "py": 2}
         )
-        variant = materialize_json_variant(
-            session.workload_id, case, root / "variant-staging",
-            selected.parameters, provider, proposer="agent",
-        )
         plan = planner.select(
             session, selected.id, selection_source="human",
             selection_rationale="use the proven one-node shape",
-            variant=variant,
+            trusted_provider_contract=True,
         )
+        self.assertIsNotNone(plan.workload_variant_id)
+        variant = planner.sites.get_variant(plan.workload_variant_id)  # type: ignore[arg-type]
         return (
             database, site, snapshot, request, session, variant, plan,
             original, local_root, remote_root,

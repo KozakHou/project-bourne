@@ -21,16 +21,21 @@ persistent daemon, or public-internet access is required on the cluster.
 - Discovery records where each fact was observed; login-node observations are
   not promoted to compute-allocation facts.
 - Site policy claims retain sources and conflicts. Only explicit normative
-  hard policy can reject a candidate; advisory evidence cannot.
+  hard policy can reject a candidate; advisory evidence cannot. Applicability
+  scopes prevent queue/partition/node-class/account policy from leaking into
+  unrelated shapes, and typed Core/MCP submission retains the evidence kind.
 - ResourceShape is first-class and separates nodes, ranks, CPUs, threads,
-  accelerators, memory, and wall time.
+  accelerators, memory, and wall time. Real scheduler discovery now feeds a
+  bounded request-shape generator without converting visibility into access.
 - Candidate exploration is deterministic, ephemeral, capped at 64, and reports
-  search coverage and truncation. One explicit selection persists a bounded
-  summary and materializes only the selected plan.
+  search coverage and truncation. Hard pruning plus fair group enumeration
+  prevents an early shape from starving later viable shapes.
 - Declarative providers use a versioned typed JSON AST. Trusted-code providers
   require explicit local enablement and must already exist at the remote site.
 - Workload variants are separately staged, hashed, linked, and safety-classed;
-  the original source is never overwritten.
+  the original source is never overwritten. Selection now materializes a
+  changed provider-bound JSON input automatically after an explicit semantic
+  trust/declaration/approval decision.
 - Environments are selected only from existing observations. Activation is
   typed and execution-scoped; v0.7 does not install or build dependencies.
 

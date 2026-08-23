@@ -22,6 +22,7 @@ from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.execution_request import execution_request_schema
 from bourneprov.workload_storage import ExecutionStore
+from tests.test_v07_planning import provider_document
 from tests.v04_fixtures import inventory_snapshot
 
 if Client is not None:
@@ -36,6 +37,7 @@ TOOLS = [
     "bourne_site_list",
     "bourne_site_inspect",
     "bourne_site_discover",
+    "bourne_site_policy_claim",
     "bourne_site_candidates",
     "bourne_site_select",
     "bourne_plan",
@@ -84,6 +86,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_name["bourne_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execute_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execution_cancel"].annotations.destructive_hint)
+        policy_schema = by_name["bourne_site_policy_claim"].input_schema
+        claim_schema = policy_schema["properties"]["claim"]
+        if "$ref" in claim_schema:
+            claim_schema = policy_schema["$defs"]["SitePolicyClaimDocument"]
+        self.assertNotIn("command", claim_schema["properties"])
+        self.assertNotIn("content", claim_schema["properties"])
         self.assertNotIn("shell", " ".join(by_name))
         self.assertEqual(
             response.structured_content["data"]["schema"],
@@ -220,18 +228,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
             target = replace(
                 snapshot.execution_targets[0],
-                authorization="observed-authorized",
-                metadata={
-                    **snapshot.execution_targets[0].metadata,
-                    "resource_shapes": [
-                        {
-                            "nodes": 1,
-                            "cpus_per_node": 4,
-                            "total_cpus": 4,
-                            "scheduler_class": snapshot.execution_targets[0].name,
-                        }
-                    ],
-                },
+                authorization="unknown",
             )
             snapshot = replace(
                 snapshot,
@@ -240,23 +237,60 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
             InventoryStore(database).save(snapshot)
             agent.site_service.sites.link_inventory(site.id, snapshot.id)
+            case = root / "case.json"
+            original = b'{"decomposition":{"x":1,"y":1},"science":42}\n'
+            case.write_bytes(original)
             document = execution_request(
-                [sys.executable, "-c", "print('site-plan')"],
-                resources={"nodes": 1, "cpus": 1},
+                [sys.executable, "case.json"],
+                artifacts={"inputs": ["case.json"]},
                 execution={"backend": "slurm"},
             )
+            provider = provider_document()
+            provider["environment_requirements"] = []
+            provider["launcher_requirements"] = []
             server = create_mcp_server(agent)
             async with Client(server) as client:
                 listed = await client.call_tool("bourne_site_list", {})
                 inspected = await client.call_tool(
                     "bourne_site_inspect", {"reference": site.id}
                 )
+                policy = await client.call_tool(
+                    "bourne_site_policy_claim",
+                    {
+                        "reference": site.id,
+                        "claim": {
+                            "subject": "reviewed-user-account",
+                            "property": "authorization",
+                            "value": True,
+                            "evidence_kind": "user_declared",
+                            "interpretation_status": "advisory",
+                            "source_identity": "mcp-test-user",
+                            "applicability": {"scope": "global"},
+                        },
+                    },
+                )
                 explored = await client.call_tool(
                     "bourne_site_candidates",
-                    {"reference": site.id, "request": document},
+                    {
+                        "reference": site.id, "request": document,
+                        "provider": provider,
+                    },
                 )
                 request_id = explored.structured_content["data"]["request"]["id"]
-                candidate = explored.structured_content["data"]["exploration"]["candidates"][0]
+                candidate = next(
+                    item
+                    for item in explored.structured_content["data"]["exploration"]["candidates"]
+                    if item["state"] == "viable"
+                    and item["parameters"] == {"px": 2, "py": 2}
+                )
+                unreviewed = await client.call_tool(
+                    "bourne_site_select",
+                    {
+                        "request_id": request_id,
+                        "candidate_id": candidate["id"],
+                        "selection_source": "test-agent",
+                    },
+                )
                 selected = await client.call_tool(
                     "bourne_site_select",
                     {
@@ -264,17 +298,34 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                         "candidate_id": candidate["id"],
                         "selection_source": "test-human",
                         "rationale": "focused MCP contract test",
+                        "trusted_provider_contract": True,
                     },
                 )
                 unknown = await client.call_tool(
                     "bourne_execution_reconcile",
                     {"reference": "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
                 )
+            original_after = case.read_bytes()
 
         self.assertEqual(listed.structured_content["data"]["sites"][0]["id"], site.id)
         self.assertEqual(inspected.structured_content["data"]["site"]["name"], "fixture-hpc")
+        self.assertTrue(policy.structured_content["ok"])
+        self.assertEqual(
+            policy.structured_content["data"]["policy_claim"]["evidence_kind"],
+            "user_declared",
+        )
         self.assertEqual(candidate["state"], "viable")
+        self.assertEqual(candidate["resource_shape"]["nodes"], 1)
+        self.assertEqual(candidate["resource_shape"]["mpi_ranks"], 4)
+        self.assertEqual(
+            unreviewed.structured_content["error"]["code"],
+            "candidate_selection_failed",
+        )
         self.assertEqual(selected.structured_content["data"]["plan"]["site_id"], site.id)
+        self.assertIsNotNone(
+            selected.structured_content["data"]["plan"]["workload_variant_id"]
+        )
+        self.assertEqual(original_after, original)
         self.assertEqual(unknown.structured_content["error"]["code"], "unknown_execution")
 
     async def test_real_stdio_negotiates_current_protocol_and_keeps_stdout_pure(self) -> None:

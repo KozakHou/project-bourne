@@ -72,11 +72,20 @@ preference decision explicitly:
 ~~~bash
 uv run bourne plan --site imperial --request bourne.json \
   --provider constraints.json \
+  --trust-provider-classifications \
   --candidate sha256:...
 
 uv run bourne execute --plan <plan-id>
 uv run bourne execution wait <execution-id>
 ~~~
+
+The trust flag is an explicit review decision for semantic classifications in
+that declarative provider; the provider cannot grant itself that authority.
+Use `--approve-variant-change PARAMETER` or
+`--declare-execution-only PARAMETER` for narrower user decisions. If the
+selected candidate changes a provider-bound JSON input, Bourne preserves the
+original and automatically binds a separately hashed `WorkloadVariant` to the
+plan.
 
 Slurm/PBS owns the job after acceptance. The laptop, VPN, SSH connection, MCP
 host, and agent may disconnect; Bourne reconnects later and reconciles the
