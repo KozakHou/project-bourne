@@ -7,19 +7,57 @@ manager or remote shell.
 ## Deployment roles
 
 ~~~text
-Researcher's computer
+Researcher's workstation
+  Linux / macOS
+        │
   CLI / Python SDK / optional local stdio MCP
+        │
   Bourne Control Plane
-      ↓ existing OpenSSH access
+        │
+        ├─ freezes immutable ExecutionPlan
+        ├─ builds/stages versioned Bourne workers
+        └─ uses existing VPN / OpenSSH
+        ▼
 
-HPC login/access node
-  one-shot Bourne Remote Worker (non-AI, user-space, no daemon)
-      ↓ sbatch or qsub
+HPC login / access node
+  one-shot Bourne Remote Worker
+        │
+        ├─ validates the plan
+        ├─ verifies staged file digests
+        ├─ stages the execution bundle
+        └─ submits with sbatch / qsub
+        ▼
+
+Slurm / PBS
+        │
+        │ allocates resources
+        ▼
 
 Compute allocation
   execution-scoped Bourne Compute Worker
-      ↓ exact positional argv, no implicit scientific shell
-  scientific workload
+        │
+        ├─ reads immutable ExecutionPlan
+        ├─ observes actual allocation
+        ├─ reproduces selected environment
+        ├─ performs compute-side preflight
+        ├─ executes exact scientific argv
+        └─ writes durable result evidence
+        ▼
+
+Scientific workload
+
+Later:
+
+Researcher's workstation
+        │
+        │ existing SSH
+        ▼
+Remote Worker: reconcile
+        │
+        ├─ exact Bourne-owned scheduler job state
+        └─ bounded result evidence
+        ▼
+Local Bourne provenance database
 ~~~
 
 The control plane owns the local database, site configuration, planning,
@@ -28,6 +66,17 @@ reconciliation. The remote worker accepts only typed protocol-v1 operations:
 `hello`, `discover`, `validate_plan`, `prepare`, `submit`, `reconcile`,
 `collect`, and `cancel`. The compute worker remains the scheduler-staged,
 stdlib-only worker introduced for local Slurm/PBS execution.
+
+The Remote Worker and Compute Worker are not agents or persistent services;
+both are short-lived, versioned Bourne workers. Bourne does not SSH directly
+into compute nodes. Slurm/PBS places the Compute Worker inside the allocation
+and owns job lifetime after acceptance. The researcher's workstation /
+control plane may disconnect and reconcile later. No AI, MCP server, AI
+credential, inbound port, root access, persistent daemon, or public-internet
+access is required on HPC.
+
+The remote-worker protocol is v1, the worker-result protocol is v2, and the
+staged-plan protocol is v3.
 
 There is no remote `exec`, arbitrary command, scheduler-command, MCP, HTTP, or
 daemon operation.
@@ -224,10 +273,11 @@ submission-state document are keyed by it. The remote worker writes
 after a parseable acceptance.
 
 After acceptance, Slurm/PBS—not Bourne—owns job lifetime. Bourne starts no
-keepalive. The local computer may disconnect. On reconnect, `execution wait`
-or the structured reconcile operation reads the exact remote execution state,
-queries only the exact Bourne-owned scheduler job, and imports a bounded worker
-result through the existing transactional validator.
+keepalive. The researcher's workstation / control plane may disconnect. On
+reconnect, `execution wait` or the structured reconcile operation reads the
+exact remote execution state, queries only the exact Bourne-owned scheduler
+job, and imports a bounded worker result through the existing transactional
+validator.
 
 If transport fails after the scheduler may have accepted:
 
@@ -255,3 +305,6 @@ remote project/staging root for execution, site-dependent module-shell
 behavior, common Slurm/PBS command formats rather than every vendor variant,
 and no scheduler-free disconnect-safe runtime. Resource shapes and policy
 claims are bounded evidence, not proof of future scheduler admission.
+
+The Bourne control plane is supported and tested on Linux and macOS. Native
+Windows is not yet validated or supported.

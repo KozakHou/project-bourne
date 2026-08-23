@@ -8,27 +8,74 @@ It answers: **Exactly how did this scientific result come to exist?**
 ## Keep AI off the cluster
 
 ~~~text
-Researcher's computer
+Researcher's workstation
+  Linux / macOS
+        │
   AI / Agent (optional)
-      ↓ local stdio MCP
+        │ local stdio MCP
+        ▼
   Bourne Control Plane
-      ↓ existing VPN / SSH
+        │
+        ├─ freezes immutable ExecutionPlan
+        ├─ builds/stages versioned Bourne workers
+        └─ uses existing VPN / OpenSSH
+        ▼
 
-HPC login/access node
-  non-AI Bourne user-space worker
-      ↓ PBS / Slurm
+HPC login / access node
+  one-shot Bourne Remote Worker
+        │
+        ├─ validates the plan
+        ├─ verifies staged file digests
+        ├─ stages the execution bundle
+        └─ submits with sbatch / qsub
+        ▼
+
+Slurm / PBS
+        │
+        │ allocates resources
+        ▼
 
 Compute allocation
-  execution-scoped Bourne worker
-      ↓ exact argv
-  scientific workload
+  execution-scoped Bourne Compute Worker
+        │
+        ├─ reads immutable ExecutionPlan
+        ├─ observes actual allocation
+        ├─ reproduces selected environment
+        ├─ performs compute-side preflight
+        ├─ executes exact scientific argv
+        └─ writes durable result evidence
+        ▼
+
+Scientific workload
+
+Later:
+
+Researcher's workstation
+        │
+        │ existing SSH
+        ▼
+Remote Worker: reconcile
+        │
+        ├─ exact Bourne-owned scheduler job state
+        └─ bounded result evidence
+        ▼
+Local Bourne provenance database
 ~~~
 
-Bourne is designed around existing HPC security boundaries. The canonical HPC
-path requires no AI agent, MCP server, AI API credential, inbound service,
-root access, persistent daemon, or public-internet access on the cluster. It
-uses the researcher's existing OpenSSH configuration and scheduler access.
-Agents receive typed Bourne operations—not an unrestricted remote shell.
+The Remote Worker and Compute Worker are not agents or persistent services;
+both are short-lived, versioned Bourne workers. Bourne does not SSH directly
+into compute nodes. Slurm/PBS places the Compute Worker inside the allocation
+and owns job lifetime after accepting the submission. The researcher's
+workstation / control plane may disconnect and reconcile the same execution
+later.
+
+The HPC path requires no AI, MCP server, AI credential, inbound port, root
+access, persistent daemon, or public-internet access on the cluster. It uses
+the researcher's existing OpenSSH configuration and scheduler access. Agents
+receive typed Bourne operations—not an unrestricted remote shell.
+
+The Bourne control plane is supported and tested on Linux and macOS. Native
+Windows is not yet validated or supported.
 
 Bourne remains agent-native, not agent-dependent. The CLI and Python services
 work without an agent or MCP.
@@ -87,10 +134,10 @@ selected candidate changes a provider-bound JSON input, Bourne preserves the
 original and automatically binds a separately hashed `WorkloadVariant` to the
 plan.
 
-Slurm/PBS owns the job after acceptance. The laptop, VPN, SSH connection, MCP
-host, and agent may disconnect; Bourne reconnects later and reconciles the
-exact execution. An ambiguous connection failure never triggers blind
-resubmission.
+Slurm/PBS owns the job after acceptance. The researcher's workstation /
+control plane, VPN, SSH connection, MCP host, and agent may disconnect; Bourne
+reconnects later and reconciles the exact execution. An ambiguous connection
+failure never triggers blind resubmission.
 
 ### Agent / MCP
 
@@ -156,6 +203,8 @@ The remote worker is one-shot, user-space, non-AI, and non-daemon. It accepts
 only versioned operations for discovery, plan validation, staging, scheduler
 submission, and reconciliation. Scientific commands remain exact argv in an
 immutable plan; no scientific argv is interpolated into remote shell text.
+The remote-worker protocol is v1, the worker-result protocol is v2, and the
+staged-plan protocol is v3.
 
 ## Agent and MCP Integration
 

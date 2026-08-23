@@ -175,5 +175,6 @@ future SDK/MCP boundary.
   terminal scheduler outcome.
 - Output capture still accumulates stdout and stderr in memory before result
   serialization; large-log spooling remains future work.
-- Windows scheduler execution and native Windows process-tree supervision are
-  not claimed.
+- The Bourne control plane is supported and tested on Linux and macOS. Native
+  Windows is not yet validated or supported, including scheduler execution and
+  native Windows process-tree supervision.

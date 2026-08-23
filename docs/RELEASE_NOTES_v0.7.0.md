@@ -59,11 +59,15 @@ The CLI, Python service, and local stdio MCP adapter expose site inspection,
 site discovery, candidate generation, explicit selection, execution, and
 reconciliation. MCP exposes no generic shell or remote-filesystem primitive.
 
-ExecutionRequest remains version 1, the compute-worker protocol remains
-backward-readable for released staged payloads, and SQLite migrates
-transactionally to schema 6 while preserving released databases. The Python
-package remains compatible with Python 3.10+, keeps zero base runtime
-dependencies, and preserves the optional `mcp` extra.
+ExecutionRequest remains version 1. The remote-worker protocol is v1, the
+worker-result protocol is v2, and the staged-plan protocol is v3; released
+staged payloads remain backward-readable. SQLite migrates transactionally to
+schema 6 while preserving released databases. The Python package remains
+compatible with Python 3.10+, keeps zero base runtime dependencies, and
+preserves the optional `mcp` extra.
+
+The Bourne control plane is supported and tested on Linux and macOS. Native
+Windows is not yet validated or supported.
 
 ## Development tooling
 
