@@ -109,7 +109,7 @@ def _candidates(
             )
 
     for scheduler in inventory.schedulers:
-        if scheduler.family not in {"slurm", "pbs"}:
+        if scheduler.family not in {"slurm", "pbs", "lsf"}:
             continue
         if workload.constraints.backend not in {"auto", scheduler.family}:
             continue
@@ -299,8 +299,11 @@ def _evaluate_scheduler_resources(
                 )
             )
     if requested.cpus is not None:
-        cpu_key = "cpus_per_node" if scheduler.family == "slurm" else "resources_max.ncpus"
-        available = _leading_int(metadata.get(cpu_key))
+        cpu_key = {
+            "slurm": "cpus_per_node",
+            "pbs": "resources_max.ncpus",
+        }.get(scheduler.family)
+        available = None if cpu_key is None else _leading_int(metadata.get(cpu_key))
         if available is None:
             unresolved.append("scheduler CPU capacity is unknown")
         elif requested.cpus > available * (requested.nodes or 1):

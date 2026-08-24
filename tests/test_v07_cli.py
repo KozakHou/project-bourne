@@ -82,6 +82,15 @@ class SiteCLITests(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             main(
                 [
+                    "plan", "--container-runtime", "apptainer",
+                    "--container-image", "/images/science.sif", "python",
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+
+        with self.assertRaises(SystemExit) as raised:
+            main(
+                [
                     "execute", "--plan", new_ulid(), "--site", "cluster",
                 ]
             )
@@ -132,6 +141,8 @@ class SiteCLITests(unittest.TestCase):
             provider["launcher_requirements"] = []
             provider_path = root / "provider.json"
             provider_path.write_text(json.dumps(provider), encoding="utf-8")
+            image = root / "science.sif"
+            image.write_bytes(b"existing-image")
             base_arguments = [
                 "plan", "--site", site.id, "--snapshot", snapshot.id,
                 "--provider", str(provider_path), "--input", "case.json",
@@ -155,6 +166,9 @@ class SiteCLITests(unittest.TestCase):
                 *base_arguments[:1],
                 "--candidate", candidate["id"],
                 "--trust-provider-classifications",
+                "--container-runtime", "apptainer",
+                "--container-image", str(image),
+                "--container-bind", f"{root}:/project:ro",
                 *base_arguments[1:],
             ]
             with patch.dict("os.environ", environment, clear=False), patch(
@@ -168,6 +182,9 @@ class SiteCLITests(unittest.TestCase):
         self.assertEqual(candidate["resource_shape"]["mpi_ranks"], 4)
         self.assertEqual(selected_code, 0)
         self.assertIsNotNone(plan["workload_variant_id"])
+        self.assertEqual(plan["container"]["runtime"], "apptainer")
+        self.assertEqual(plan["container"]["image"], str(image))
+        self.assertTrue(plan["container"]["mounts"][0]["read_only"])
         self.assertNotEqual(plan["arguments"][-1], "case.json")
         self.assertEqual(original_after, original)
 

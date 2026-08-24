@@ -12,6 +12,7 @@ from .execution_outcomes import ExecutionTelemetrySummary, VerificationRun
 from .execution_request import ExecutionRequest
 from .ids import new_ulid
 from .models import Artifact, Experiment, ExperimentLineage
+from .runtime_evidence import RuntimeEvidence, TerminationEvidence
 from .storage import ExperimentStore, _insert_experiment_record
 from .workload_models import (
     AllocationObservation,
@@ -633,9 +634,25 @@ class ExecutionStore:
             }
         )
 
+    def runtime_evidence(
+        self, execution_id: str
+    ) -> tuple[RuntimeEvidence, TerminationEvidence] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT evidence_json, termination_json FROM runtime_evidence WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            RuntimeEvidence.from_dict(json.loads(row["evidence_json"])),
+            TerminationEvidence.from_dict(json.loads(row["termination_json"])),
+        )
+
     def view(self, execution_id: str) -> ExecutionView:
         execution = self.get_execution(execution_id)
         plan = self.get_plan(execution.plan_id)
+        runtime = self.runtime_evidence(execution_id)
         return ExecutionView(
             execution=execution, plan=plan,
             workload=self.get_workload(plan.workload_id),
@@ -658,6 +675,8 @@ class ExecutionStore:
                 if (verification := self.verification(execution_id)) is None
                 else verification.to_dict()
             ),
+            runtime_evidence=None if runtime is None else runtime[0].to_dict(),
+            termination=None if runtime is None else runtime[1].to_dict(),
         )
 
     def import_experiment_result(
@@ -673,6 +692,8 @@ class ExecutionStore:
         details: dict[str, object] | None = None,
         telemetry: ExecutionTelemetrySummary | None = None,
         verification: VerificationRun | None = None,
+        runtime_evidence: RuntimeEvidence | None = None,
+        termination: TerminationEvidence | None = None,
     ) -> None:
         """Import execution-plane provenance and link it atomically."""
 
@@ -706,6 +727,10 @@ class ExecutionStore:
                 telemetry,
                 verification,
             )
+            self._insert_runtime_evidence(
+                connection, execution_id, experiment.id,
+                runtime_evidence, termination,
+            )
             connection.execute(
                 """
                 UPDATE execution_attempts
@@ -724,6 +749,8 @@ class ExecutionStore:
         occurred_at: str,
         details: dict[str, object],
         error: str | None,
+        runtime_evidence: RuntimeEvidence | None = None,
+        termination: TerminationEvidence | None = None,
     ) -> None:
         """Atomically retain a worker-observed failure with no experiment."""
 
@@ -741,6 +768,9 @@ class ExecutionStore:
                 if allocation.execution_id != execution_id:
                     raise ValueError("allocation execution ID must match the import")
                 self._insert_allocation(connection, allocation)
+            self._insert_runtime_evidence(
+                connection, execution_id, None, runtime_evidence, termination
+            )
             connection.execute(
                 """
                 UPDATE execution_attempts
@@ -917,6 +947,38 @@ class ExecutionStore:
                 allocation.id, allocation.execution_id, allocation.observed_at,
                 _json(allocation.resources), _json(allocation.hosts),
                 _json(allocation.evidence),
+            ),
+        )
+
+    @staticmethod
+    def _insert_runtime_evidence(
+        connection: sqlite3.Connection,
+        execution_id: str,
+        experiment_id: str | None,
+        runtime_evidence: RuntimeEvidence | None,
+        termination: TerminationEvidence | None,
+    ) -> None:
+        if runtime_evidence is None and termination is None:
+            return
+        if runtime_evidence is None or termination is None:
+            raise ValueError("runtime and termination evidence must be imported together")
+        if (
+            runtime_evidence.execution_id != execution_id
+            or runtime_evidence.experiment_id != experiment_id
+        ):
+            raise ValueError("runtime evidence relationships do not match the imported result")
+        connection.execute(
+            """
+            INSERT INTO runtime_evidence (
+                id, execution_id, experiment_id, schema_version, observed_at,
+                coverage_json, evidence_json, termination_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                runtime_evidence.id, execution_id, experiment_id,
+                runtime_evidence.schema_version, runtime_evidence.observed_at,
+                _json(runtime_evidence.coverage), _json(runtime_evidence.to_dict()),
+                _json(termination.to_dict()),
             ),
         )
 

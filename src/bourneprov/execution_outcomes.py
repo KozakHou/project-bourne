@@ -236,7 +236,7 @@ def build_telemetry_summary(
         unavailable.append("known_input_artifact_bytes")
     if request.artifacts.outputs and output_total is None:
         unavailable.append("known_output_artifact_bytes")
-    if plan.backend in {"slurm", "pbs"} and scheduler_wait_seconds is None:
+    if plan.backend in {"slurm", "pbs", "lsf"} and scheduler_wait_seconds is None:
         unavailable.append("scheduler_wait_seconds")
     allocated = None if allocation is None else dict(allocation.resources)
     if allocated is None:

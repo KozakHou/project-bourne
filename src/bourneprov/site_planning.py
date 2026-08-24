@@ -33,12 +33,12 @@ def resource_shapes_from_inventory(snapshot: InventorySnapshot) -> list[Resource
     for target in snapshot.execution_targets:
         raw_shapes = target.metadata.get("resource_shapes")
         if raw_shapes is None:
-            # Slurm/PBS discovery describes bounded target classes rather than
+            # Scheduler discovery describes bounded target classes rather than
             # concrete allocations. Preserve those partial facts as a shape,
             # but do not turn visible capacity/queue maxima into a request and
             # do not turn visibility into authorization.
             scheduler = target.metadata.get("scheduler")
-            if scheduler not in {"slurm", "pbs"}:
+            if scheduler not in {"slurm", "pbs", "lsf"}:
                 continue
             normalized: dict[str, Any] = {"scheduler_class": target.name}
             if scheduler == "slurm":
@@ -104,7 +104,7 @@ def generate_resource_shapes(
                     )
                 except (TypeError, ValueError):
                     continue
-        elif target.metadata.get("scheduler") in {"slurm", "pbs"}:
+        elif target.metadata.get("scheduler") in {"slurm", "pbs", "lsf"}:
             generated.extend(
                 _generated_target_shapes(target, workload, hints, policy_claims, limit)
             )
@@ -717,6 +717,19 @@ def _evaluate_candidate(
         state = "unresolved"
         unresolved.extend(item.message for item in authorization_reasons)
     requirement_reasons = _resource_requirements(workload.resources, shape)
+    if shape.placement.get("scheduler") == "lsf":
+        for name, requested in (
+            ("memory", workload.resources.memory_bytes),
+            ("GPU", workload.resources.gpus),
+        ):
+            if requested not in {None, 0}:
+                requirement_reasons.append(
+                    CandidateReason(
+                        "resource_unknown",
+                        f"LSF {name} request mapping is unresolved for this site",
+                        "unknown",
+                    )
+                )
     reasons.extend(requirement_reasons)
     if any(item.code == "resource_incompatible" for item in requirement_reasons):
         state = "hard_invalid"

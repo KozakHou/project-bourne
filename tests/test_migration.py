@@ -197,6 +197,7 @@ class MigrationTests(unittest.TestCase):
             with closing(sqlite3.connect(database)) as connection:
                 with connection:
                     for table in (
+                        "runtime_evidence",
                         "remote_execution_states", "execution_plan_site_links",
                         "workload_variants", "candidate_selection_summaries",
                         "inventory_site_links", "site_policy_claims", "sites",
@@ -242,11 +243,29 @@ class MigrationTests(unittest.TestCase):
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
                 foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
-            self.assertEqual(version, 6)
+                constrained = {
+                    row[0]: row[1]
+                    for row in connection.execute(
+                        """
+                        SELECT name, sql FROM sqlite_master
+                        WHERE name IN (
+                            'execution_requests', 'execution_plans',
+                            'execution_attempts', 'scheduler_jobs'
+                        )
+                        """
+                    )
+                }
+            self.assertEqual(version, 7)
+            self.assertIn(
+                "request_schema_version IN (1, 2)",
+                constrained["execution_requests"],
+            )
+            for table in ("execution_plans", "execution_attempts", "scheduler_jobs"):
+                self.assertIn("lsf", constrained[table])
         self.assertEqual(integrity, "ok")
         self.assertEqual(foreign_keys, [])
 
-    def test_released_schema_three_migrates_transactionally_to_schema_six(self) -> None:
+    def test_released_schema_three_migrates_transactionally_to_schema_seven(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "schema-three.sqlite3"
             with closing(sqlite3.connect(database)) as connection:
@@ -314,7 +333,7 @@ class MigrationTests(unittest.TestCase):
                 integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
                 foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertIn("execution_plans", tables)
         self.assertIn("execution_events", tables)
         self.assertIn("execution_requests", tables)
@@ -356,7 +375,7 @@ class MigrationTests(unittest.TestCase):
             foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         return database, before_ids, after, reopened, version_after, integrity, foreign_keys
 
-    def test_actual_released_v011_database_migrates_to_schema_six(self) -> None:
+    def test_actual_released_v011_database_migrates_to_schema_seven(self) -> None:
         (
             _database, before_ids, after, snapshot, version, integrity, foreign_keys
         ) = self._migrate_released_fixture("0.1.1")
@@ -364,13 +383,13 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual({item.status for item in after}, {"completed", "failed", "interrupted"})
         self.assertEqual({item.id for item in after}, set(before_ids))
         self.assertTrue(all(item.schema_version == 1 for item in after))
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertEqual(integrity, "ok")
         self.assertEqual(foreign_keys, [])
         self.assertEqual(len(snapshot.targets), 1)
         self.assertGreaterEqual(len(snapshot.capabilities), 2)
 
-    def test_actual_released_v020_database_migrates_to_schema_six(self) -> None:
+    def test_actual_released_v020_database_migrates_to_schema_seven(self) -> None:
         (
             database, before_ids, after, snapshot, version, integrity, foreign_keys
         ) = self._migrate_released_fixture("0.2.0")
@@ -384,7 +403,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual({item.capture_status for item in artifacts}, {"complete"})
         self.assertTrue(any(item is not None for item in lineage))
         self.assertTrue(all(item.execution_context.requested_executable for item in after))
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertEqual(integrity, "ok")
         self.assertEqual(foreign_keys, [])
         self.assertEqual(len(snapshot.execution_contexts), 1)
@@ -431,7 +450,7 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(
             all(item.execution_context.requested_executable == "solver" for item in old_records)
         )
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertIn("artifacts", tables)
         self.assertIn("experiment_lineage", tables)
         self.assertIn("inventory_snapshots", tables)

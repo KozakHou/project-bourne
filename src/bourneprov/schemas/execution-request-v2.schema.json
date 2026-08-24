@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/KozakHou/project-bourne/main/src/bourneprov/schemas/execution-request-v2.schema.json",
+  "title": "Project Bourne ExecutionRequest v2",
+  "description": "Framework-independent execution intent with direct, Slurm, PBS, and IBM LSF backends.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "command"],
+  "properties": {
+    "kind": {"const": "bourne.execution-request"},
+    "version": {"const": 2},
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+    },
+    "working_directory": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "maxItems": 2048,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 2048,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpus": {"type": "integer", "minimum": 1},
+        "gpus": {"type": "integer", "minimum": 0},
+        "nodes": {"type": "integer", "minimum": 1},
+        "mpi_ranks": {"type": "integer", "minimum": 1},
+        "memory": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "pattern": "^[1-9][0-9]*(?:[KkMmGgTt](?:[Ii]?[Bb])?|[Bb])?$"}
+          ]
+        },
+        "walltime": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "pattern": "^(?:[1-9][0-9]*[hHmMsS]|[0-9]+:[0-5][0-9]:[0-5][0-9]|[1-9][0-9]*)$"}
+          ]
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["auto", "direct", "slurm", "pbs", "lsf"]},
+        "target": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"},
+        "context": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parent_experiment": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"mode": {"enum": ["off", "summary"]}}
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {"$ref": "#/$defs/verificationCheck"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "verificationCheck": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": {"const": "output_exists"},
+            "path": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path", "min_bytes"],
+          "properties": {
+            "type": {"const": "output_min_bytes"},
+            "path": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"},
+            "min_bytes": {"type": "integer", "minimum": 0}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path", "sha256"],
+          "properties": {
+            "type": {"const": "output_sha256"},
+            "path": {"type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000]*$"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+          }
+        }
+      ]
+    }
+  }
+}

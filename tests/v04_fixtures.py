@@ -81,6 +81,10 @@ def inventory_snapshot(
                     "scheduler": "pbs", "resources_max.ncpus": "64",
                     "resources_max.mem": "512gb",
                 }
+                if family == "pbs"
+                else {
+                    "scheduler": "lsf", "node_capacity": "unknown",
+                }
             ),
         )
         targets.append(target)

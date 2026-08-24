@@ -201,7 +201,7 @@ class InventoryStorageTests(unittest.TestCase):
                     "PRAGMA foreign_key_check"
                 ).fetchall()
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertEqual(reloaded, original)
         self.assertEqual(target_count, 1)
         self.assertEqual(context_count, 1)

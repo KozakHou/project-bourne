@@ -40,7 +40,7 @@ scheduler. Institutional HPC and supercomputer-style scheduler environments
 use the same model. On an HPC access target, read-only scheduler metadata can
 add partition/queue target classes without scanning or connecting to compute
 nodes. Bourne does not invent a site name or call a host a login node from its
-hostname or from scheduler-client presence. An active Slurm/PBS allocation is
+hostname or from scheduler-client presence. An active Slurm/PBS/LSF allocation is
 recorded only from direct allow-listed allocation evidence.
 
 Discovered execution contexts are candidate locations such as the current

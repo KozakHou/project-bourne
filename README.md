@@ -27,10 +27,10 @@ HPC login / access node
         ├─ validates the plan
         ├─ verifies staged file digests
         ├─ stages the execution bundle
-        └─ submits with sbatch / qsub
+        └─ submits with sbatch / qsub / bsub
         ▼
 
-Slurm / PBS
+Slurm / PBS / IBM LSF
         │
         │ allocates resources
         ▼
@@ -64,7 +64,7 @@ Local Bourne provenance database
 
 The Remote Worker and Compute Worker are not agents or persistent services;
 both are short-lived, versioned Bourne workers. Bourne does not SSH directly
-into compute nodes. Slurm/PBS places the Compute Worker inside the allocation
+into compute nodes. Slurm/PBS/LSF places the Compute Worker inside the allocation
 and owns job lifetime after accepting the submission. The researcher's
 workstation / control plane may disconnect and reconcile the same execution
 later.
@@ -84,8 +84,7 @@ work without an agent or MCP.
 
 ### Human
 
-Install Project Bourne v0.7.0 for local provenance and site-aware Slurm/PBS
-workflows:
+The latest public release remains v0.7.0:
 
 ~~~bash
 python -m pip install "bourneprov==0.7.0"
@@ -94,8 +93,17 @@ bourne run python examples/demo.py
 bourne list
 bourne show @1
 
-# Or execute an ExecutionRequest v1 document:
+# Or execute a released ExecutionRequest v1 document:
 bourne execute --request bourne.json
+~~~
+
+v0.8.0 is under development and is not published. To exercise its LSF,
+runtime-evidence, and existing-image features, use this source checkout with
+the locked contributor environment:
+
+~~~bash
+uv sync --locked --all-extras --dev
+uv run --frozen --no-sync bourne --version
 ~~~
 
 Configure a site-aware SSH workflow with the installed CLI:
@@ -132,14 +140,14 @@ selected candidate changes a provider-bound JSON input, Bourne preserves the
 original and automatically binds a separately hashed `WorkloadVariant` to the
 plan.
 
-Slurm/PBS owns the job after acceptance. The researcher's workstation /
+Slurm/PBS/LSF owns the job after acceptance. The researcher's workstation /
 control plane, VPN, SSH connection, MCP host, and agent may disconnect; Bourne
 reconnects later and reconciles the exact execution. An ambiguous connection
 failure never triggers blind resubmission.
 
 ### Agent / MCP
 
-The v0.7.0 agent and MCP entrypoints remain local stdio:
+The public v0.7.0 agent and MCP entrypoints remain local stdio:
 
 ~~~bash
 python -m pip install "bourneprov[mcp]==0.7.0"
@@ -183,6 +191,22 @@ bourne run mpirun -np 64 ./solver
 Program stdout and stderr remain visible during execution and are preserved in
 the experiment record.
 
+## Runtime truth in v0.8
+
+v0.8 keeps planning truth, scheduler truth, runtime truth, experiment truth,
+verification, and scientific validity separate. The execution-scoped Compute
+Worker records versioned process, allocation, CPU, memory, I/O, GPU, and
+environment evidence with explicit `observed`, `partially_observed`,
+`unavailable`, `unsupported`, or `unknown` coverage. Missing telemetry does not
+fail a valid workload and never becomes a fabricated zero.
+
+IBM LSF joins Slurm and PBS with bounded queue discovery, `bsub`, exact-job
+active and historical `bjobs` reconciliation, and `bkill`. Existing
+Apptainer/Singularity images can be frozen into a selected site-aware plan;
+Bourne verifies the existing runtime/image on the compute side and passes the
+scientific command as exact argv. It does not build, pull, install, or manage
+images. See [runtime evidence and scheduler coverage](docs/RUNTIME_EVIDENCE.md).
+
 ## Core architecture
 
 Bourne Core owns deterministic execution, evidence, planning, storage, and
@@ -201,18 +225,20 @@ The remote worker is one-shot, user-space, non-AI, and non-daemon. It accepts
 only versioned operations for discovery, plan validation, staging, scheduler
 submission, and reconciliation. Scientific commands remain exact argv in an
 immutable plan; no scientific argv is interpolated into remote shell text.
-The remote-worker protocol is v1, the worker-result protocol is v2, and the
-staged-plan protocol is v3.
+The remote-worker protocol remains v1. v0.8 adds worker-result protocol v3 and
+staged-plan protocol v4 while retaining readers for released worker-result
+v1/v2 and staged-plan v1/v2/v3 payloads.
 
 ## Agent and MCP Integration
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.7.0
-npm package and matching Registry metadata use the same release identity.
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The public
+v0.7.0 npm package and matching Registry metadata use the same release identity;
+the v0.8.0 development metadata is not published.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
-simulation using four GPUs and preserve provenance” into ExecutionRequest v1,
+simulation using four GPUs and preserve provenance” into ExecutionRequest v2,
 ask Bourne to plan it, show the deterministic resolution, and execute the
 immutable plan after execution intent is established. Bourne itself does not
 interpret unconstrained natural language and does not call another model.
@@ -220,7 +246,7 @@ interpret unconstrained natural language and does not call another model.
 The agent path is deliberately two-phase:
 
 ~~~text
-agent intent → ExecutionRequest v1 → bourne_plan → inspect → bourne_execute_plan
+agent intent → ExecutionRequest v2 → bourne_plan → inspect → bourne_execute_plan
 ~~~
 
 Planning never runs the workload or silently discovers infrastructure.
@@ -236,7 +262,7 @@ An execution can now be described once in a bounded, versioned JSON request:
 ~~~json
 {
   "kind": "bourne.execution-request",
-  "version": 1,
+  "version": 2,
   "command": ["python", "train.py", "--case", "case1"],
   "artifacts": {
     "inputs": ["config.yaml"],
@@ -268,7 +294,7 @@ Create a minimal request without executing or discovering anything:
 
 ~~~bash
 bourne request init --output bourne.json -- python train.py
-bourne request schema > execution-request-v1.schema.json
+bourne request schema > execution-request-v2.schema.json
 ~~~
 
 Existing flag-based commands remain supported. They compile into the same
@@ -347,10 +373,10 @@ bourne execution wait @1
 
 While a recorded job is still active, `bourne execution cancel @1` requests
 cancellation of that Bourne-managed job. The same planning and lifecycle model
-supports `--backend pbs`.
+supports `--backend pbs` and `--backend lsf`.
 
 Direct execution reuses Bourne's existing live-output, process-group, artifact,
-lineage, and experiment-provenance machinery. Slurm and PBS plans use a
+lineage, and experiment-provenance machinery. Slurm, PBS, and LSF plans use a
 self-contained Bourne worker staged with the plan. The worker performs
 preflight and records the actual allocated host and scientific experiment;
 the access-side controller imports its bounded JSON result transactionally.
@@ -380,7 +406,7 @@ bourne inventory --json
 Discovery covers the current identity and access target, allow-listed
 user-relevant storage paths, direct execution contexts, generic PATH
 executables, optional Conda/virtualenv/container/module contexts, safe system
-capabilities, Bourne history, and read-only Slurm/PBS target-class summaries
+capabilities, Bourne history, and read-only Slurm/PBS/LSF target-class summaries
 when available. An unknown executable is recorded generically without being
 run. Laptops, desktop and GPU workstations, DGX-class personal machines, shared
 laboratory systems, and scheduler-backed HPC sites are all valid compute
@@ -527,9 +553,9 @@ Use a project-specific database with:
 export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
-Opening an older Bourne database, including released v0.1.1 through v0.6.0
-databases, with v0.7.0 performs deterministic transactional
-migrations through schema 6.
+Opening an older Bourne database, including released v0.1.1 through v0.7.0
+databases, with v0.8.0.dev0 performs deterministic transactional migrations
+through schema 7.
 Existing experiments, artifacts, lineage, inventories, workloads, plans,
 executions, scheduler jobs, allocations, events, and experiment links remain
 readable. Migration does not invent `ExecutionRequest` history for v0.4
@@ -546,7 +572,7 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The repository version is `0.7.0`. The base runtime has zero third-party
+The repository version is `0.8.0.dev0`. The base runtime has zero third-party
 dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:
@@ -557,11 +583,13 @@ uv run --frozen --no-sync python -W error::ResourceWarning -m unittest discover 
 uv build --no-sources
 ~~~
 
-stdout and stderr are still accumulated in memory before final persistence.
-Disk-spooled logs, automatic artifact discovery/archival, scientific dependency
+Compute-worker stdout and stderr remain live and are bounded to 8 MiB per
+captured stream in the result bundle; truncation is explicit runtime evidence.
+Ordinary local `bourne run` retains its existing capture behavior. Disk-spooled
+logs, automatic artifact discovery/archival, scientific dependency
 installation or source builds, generic data synchronization, unrestricted
-remote shell, scheduler-free disconnect-safe remote supervision, distributed
+remote shell, scheduler-free disconnect-safe remote supervision, whole-allocation distributed
 telemetry, queue/performance prediction, arbitrary verification scripts,
 hosted HTTP MCP, embedded LLMs, and broad scientific-validity inference remain
-outside v0.7. See [the site-aware architecture](docs/SITE_AWARE_PLANNING.md) and
-[VISION](docs/VISION.md).
+outside v0.8. See [runtime evidence and scheduler coverage](docs/RUNTIME_EVIDENCE.md),
+[the site-aware architecture](docs/SITE_AWARE_PLANNING.md), and [VISION](docs/VISION.md).

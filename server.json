@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.KozakHou/project-bourne",
   "title": "Project Bourne",
-  "description": "Run reproducible scientific workloads on GPUs, local compute, Slurm, and PBS with provenance.",
+  "description": "Run reproducible scientific workloads on GPUs, local compute, Slurm, PBS, and LSF with provenance.",
   "repository": {
     "url": "https://github.com/KozakHou/project-bourne",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.8.0-dev.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@project-bourne/mcp",
-      "version": "0.7.0",
+      "version": "0.8.0-dev.0",
       "transport": {
         "type": "stdio"
       }

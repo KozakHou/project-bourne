@@ -13,7 +13,8 @@ from .workload_models import ExecutionPlan, WorkloadSpec
 
 RELEASED_V04_STAGED_PLAN_SCHEMA_VERSION = 1
 RELEASED_V05_STAGED_PLAN_SCHEMA_VERSION = 2
-STAGED_PLAN_SCHEMA_VERSION = 3
+RELEASED_V07_STAGED_PLAN_SCHEMA_VERSION = 3
+STAGED_PLAN_SCHEMA_VERSION = 4
 
 
 def build_worker_zipapp(target: Path) -> Path:
@@ -76,6 +77,11 @@ def write_staged_plan(
             if request is None
             else (
                 STAGED_PLAN_SCHEMA_VERSION
+                if (
+                    plan.container is not None
+                    or request.request_schema_version >= 2
+                )
+                else RELEASED_V07_STAGED_PLAN_SCHEMA_VERSION
                 if any(
                     value is not None
                     for value in (

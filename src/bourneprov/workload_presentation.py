@@ -107,6 +107,22 @@ def format_execution(view: ExecutionView) -> str:
             else str(view.telemetry["state"])
         )
     )
+    lines.append(
+        "Termination: "
+        + (
+            "unavailable"
+            if view.termination is None
+            else f"{view.termination['outcome']} ({view.termination['phase']})"
+        )
+    )
+    lines.append("Runtime evidence coverage:")
+    if view.runtime_evidence is None:
+        lines.append("  unavailable")
+    else:
+        for name in ("allocation", "cpu", "environment", "gpu", "io", "memory", "process"):
+            group = view.runtime_evidence.get(name, {})
+            value = group.get("coverage", "unknown") if isinstance(group, dict) else "unknown"
+            lines.append(f"  {name}: {value}")
     lines.append("Allocated resources:")
     if view.allocations:
         for allocation in view.allocations:

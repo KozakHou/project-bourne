@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from .planning_models import ResolvedEnvironment, ResourceShape
+from .planning_models import ContainerExecution, ResolvedEnvironment, ResourceShape
 
 EvidenceState = Literal["explicit", "observed", "inferred", "historical", "unknown"]
-BackendName = Literal["direct", "slurm", "pbs"]
+BackendName = Literal["direct", "slurm", "pbs", "lsf"]
 CompatibilityState = Literal["compatible", "partial", "incompatible", "unknown"]
 _EVIDENCE_STATES = {"explicit", "observed", "inferred", "historical", "unknown"}
-_BACKENDS = {"direct", "slurm", "pbs"}
+_BACKENDS = {"direct", "slurm", "pbs", "lsf"}
 _COMPATIBILITY_STATES = {"compatible", "partial", "incompatible", "unknown"}
 
 
@@ -94,7 +94,7 @@ class ExecutionConstraints:
     context: str | None = None
 
     def __post_init__(self) -> None:
-        if self.backend not in {"auto", "direct", "slurm", "pbs"}:
+        if self.backend not in {"auto", "direct", "slurm", "pbs", "lsf"}:
             raise ValueError(f"unsupported backend: {self.backend}")
 
     @classmethod
@@ -223,6 +223,7 @@ class ExecutionPlan:
     workload_variant_id: str | None = None
     selection_summary_id: str | None = None
     policy_basis: list[dict[str, Any]] = field(default_factory=list)
+    container: ContainerExecution | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in _BACKENDS:
@@ -250,6 +251,9 @@ class ExecutionPlan:
         )
         value["environment"] = (
             None if self.environment is None else self.environment.to_dict()
+        )
+        value["container"] = (
+            None if self.container is None else self.container.to_dict()
         )
         return value
 
@@ -288,6 +292,11 @@ class ExecutionPlan:
             workload_variant_id=value.get("workload_variant_id"),
             selection_summary_id=value.get("selection_summary_id"),
             policy_basis=list(value.get("policy_basis", [])),
+            container=(
+                None
+                if value.get("container") is None
+                else ContainerExecution.from_dict(value["container"])
+            ),
         )
 
 
@@ -362,6 +371,8 @@ class ExecutionView:
     request_id: str | None = None
     telemetry: dict[str, Any] | None = None
     verification: dict[str, Any] | None = None
+    runtime_evidence: dict[str, Any] | None = None
+    termination: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -17,7 +17,7 @@ from .models import (
     SystemProvenance,
 )
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 _SCHEMA_V1 = (
     """
@@ -319,7 +319,7 @@ _MIGRATION_3_TO_4 = (
             REFERENCES workload_specs(id) ON DELETE RESTRICT,
         inventory_snapshot_id TEXT NOT NULL
             REFERENCES inventory_snapshots(id) ON DELETE RESTRICT,
-        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs')),
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs', 'lsf')),
         access_target_id TEXT NOT NULL
             REFERENCES discovered_targets(id) ON DELETE RESTRICT,
         execution_target_id TEXT
@@ -342,7 +342,7 @@ _MIGRATION_3_TO_4 = (
         id TEXT PRIMARY KEY,
         plan_id TEXT NOT NULL
             REFERENCES execution_plans(id) ON DELETE RESTRICT,
-        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs')),
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs', 'lsf')),
         state TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -359,7 +359,7 @@ _MIGRATION_3_TO_4 = (
     CREATE TABLE scheduler_jobs (
         execution_id TEXT PRIMARY KEY
             REFERENCES execution_attempts(id) ON DELETE CASCADE,
-        family TEXT NOT NULL CHECK (family IN ('slurm', 'pbs')),
+        family TEXT NOT NULL CHECK (family IN ('slurm', 'pbs', 'lsf')),
         job_id TEXT NOT NULL,
         submitting_identity TEXT NOT NULL,
         submitted_at TEXT NOT NULL,
@@ -413,7 +413,7 @@ _MIGRATION_4_TO_5 = (
     CREATE TABLE execution_requests (
         id TEXT PRIMARY KEY,
         request_schema_version INTEGER NOT NULL
-            CHECK (request_schema_version = 1),
+            CHECK (request_schema_version IN (1, 2)),
         created_at TEXT NOT NULL,
         base_directory TEXT NOT NULL,
         working_directory TEXT NOT NULL,
@@ -595,6 +595,109 @@ _MIGRATION_5_TO_6 = (
     """,
 )
 
+_SCHEMA_7_RUNTIME_EVIDENCE = (
+    """
+    CREATE TABLE runtime_evidence (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL UNIQUE
+            REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        experiment_id TEXT
+            REFERENCES experiments(id) ON DELETE RESTRICT,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        observed_at TEXT NOT NULL,
+        coverage_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        termination_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE INDEX runtime_evidence_experiment
+    ON runtime_evidence (experiment_id, observed_at, id)
+    """,
+)
+
+_MIGRATION_6_TO_7_REBUILD = (
+    """
+    CREATE TABLE execution_requests_v7 (
+        id TEXT PRIMARY KEY,
+        request_schema_version INTEGER NOT NULL CHECK (request_schema_version IN (1, 2)),
+        created_at TEXT NOT NULL,
+        base_directory TEXT NOT NULL,
+        working_directory TEXT NOT NULL,
+        resolved_working_directory TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('cli', 'file', 'sdk')),
+        request_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """INSERT INTO execution_requests_v7 SELECT * FROM execution_requests""",
+    """DROP TABLE execution_requests""",
+    """ALTER TABLE execution_requests_v7 RENAME TO execution_requests""",
+    """
+    CREATE INDEX execution_requests_created_at
+    ON execution_requests (created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE execution_plans_v7 (
+        id TEXT PRIMARY KEY,
+        workload_id TEXT NOT NULL REFERENCES workload_specs(id) ON DELETE RESTRICT,
+        inventory_snapshot_id TEXT NOT NULL REFERENCES inventory_snapshots(id) ON DELETE RESTRICT,
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs', 'lsf')),
+        access_target_id TEXT NOT NULL REFERENCES discovered_targets(id) ON DELETE RESTRICT,
+        execution_target_id TEXT REFERENCES discovered_targets(id) ON DELETE RESTRICT,
+        execution_context_id TEXT REFERENCES discovered_execution_contexts(id) ON DELETE RESTRICT,
+        compatibility_state TEXT NOT NULL CHECK (compatibility_state IN
+            ('compatible', 'partial', 'incompatible', 'unknown')),
+        created_at TEXT NOT NULL,
+        plan_json TEXT NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    INSERT INTO execution_plans_v7 SELECT * FROM execution_plans
+    """,
+    """DROP TABLE execution_plans""",
+    """ALTER TABLE execution_plans_v7 RENAME TO execution_plans""",
+    """
+    CREATE INDEX execution_plans_created_at
+    ON execution_plans (created_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE execution_attempts_v7 (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL REFERENCES execution_plans(id) ON DELETE RESTRICT,
+        backend TEXT NOT NULL CHECK (backend IN ('direct', 'slurm', 'pbs', 'lsf')),
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        submitting_identity TEXT,
+        staging_directory TEXT,
+        error TEXT
+    ) WITHOUT ROWID
+    """,
+    """INSERT INTO execution_attempts_v7 SELECT * FROM execution_attempts""",
+    """DROP TABLE execution_attempts""",
+    """ALTER TABLE execution_attempts_v7 RENAME TO execution_attempts""",
+    """
+    CREATE INDEX execution_attempts_updated_at
+    ON execution_attempts (updated_at DESC, id DESC)
+    """,
+    """
+    CREATE TABLE scheduler_jobs_v7 (
+        execution_id TEXT PRIMARY KEY REFERENCES execution_attempts(id) ON DELETE CASCADE,
+        family TEXT NOT NULL CHECK (family IN ('slurm', 'pbs', 'lsf')),
+        job_id TEXT NOT NULL,
+        submitting_identity TEXT NOT NULL,
+        submitted_at TEXT NOT NULL,
+        state TEXT NOT NULL,
+        last_observed_at TEXT NOT NULL,
+        UNIQUE (family, job_id)
+    ) WITHOUT ROWID
+    """,
+    """INSERT INTO scheduler_jobs_v7 SELECT * FROM scheduler_jobs""",
+    """DROP TABLE scheduler_jobs""",
+    """ALTER TABLE scheduler_jobs_v7 RENAME TO scheduler_jobs""",
+    *_SCHEMA_7_RUNTIME_EVIDENCE,
+)
+
 
 class ExperimentNotFound(LookupError):
     pass
@@ -636,6 +739,7 @@ class ExperimentStore:
         try:
             with self._connection() as connection:
                 version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                opened_version = version
                 if version > LATEST_SCHEMA_VERSION:
                     raise UnsupportedDatabaseVersion(
                         f"database schema version {version} is newer than supported "
@@ -681,6 +785,36 @@ class ExperimentStore:
                     for statement in _MIGRATION_5_TO_6:
                         connection.execute(statement)
                     connection.execute("PRAGMA user_version = 6")
+                    version = 6
+                if version == 6:
+                    if opened_version in {4, 5, 6}:
+                        # Released schema-4/5/6 databases need CHECK-constrained
+                        # tables rebuilt to admit LSF and request v2. Foreign keys
+                        # are disabled only for this transaction, then verified.
+                        connection.commit()
+                        connection.execute("PRAGMA foreign_keys = OFF")
+                        try:
+                            connection.execute("BEGIN")
+                            for statement in _MIGRATION_6_TO_7_REBUILD:
+                                connection.execute(statement)
+                            connection.execute("PRAGMA user_version = 7")
+                            connection.commit()
+                        except Exception:
+                            connection.rollback()
+                            raise
+                        finally:
+                            connection.execute("PRAGMA foreign_keys = ON")
+                        violations = connection.execute(
+                            "PRAGMA foreign_key_check"
+                        ).fetchall()
+                        if violations:
+                            raise DatabaseMigrationError(
+                                "schema-7 migration failed foreign-key validation"
+                            )
+                    else:
+                        for statement in _SCHEMA_7_RUNTIME_EVIDENCE:
+                            connection.execute(statement)
+                        connection.execute("PRAGMA user_version = 7")
         except sqlite3.Error as exc:
             raise DatabaseMigrationError(f"could not migrate Bourne database: {exc}") from exc
 

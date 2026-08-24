@@ -55,8 +55,8 @@ class Site:
             raise ValueError("site ID and a safe site name are required")
         if self.kind not in _SITE_KINDS:
             raise ValueError(f"unsupported site kind: {self.kind}")
-        if self.scheduler_hint not in {None, "slurm", "pbs", "none", "auto"}:
-            raise ValueError("scheduler hint must be slurm, pbs, none, or auto")
+        if self.scheduler_hint not in {None, "slurm", "pbs", "lsf", "none", "auto"}:
+            raise ValueError("scheduler hint must be slurm, pbs, lsf, none, or auto")
         if self.ssh_port is not None and (
             isinstance(self.ssh_port, bool)
             or not isinstance(self.ssh_port, int)

@@ -1,7 +1,7 @@
 # `@project-bourne/mcp`
 
 Plan and execute reproducible scientific and engineering workloads across local
-compute, GPUs, Slurm, and PBS with preserved experiment provenance, artifacts,
+compute, GPUs, Slurm, PBS, and LSF with preserved experiment provenance, artifacts,
 lineage, telemetry, and verification. This zero-runtime-dependency package
 launches the canonical local Project Bourne MCP server:
 
@@ -22,5 +22,6 @@ execution, schedulers, provenance, telemetry, and verification remain in the
 Python Bourne core.
 
 The canonical official MCP Registry identity is
-`io.github.KozakHou/project-bourne`. The v0.7.0 npm package and matching
-Registry metadata use the same release identity.
+`io.github.KozakHou/project-bourne`. The public v0.7.0 npm package and matching
+Registry metadata use the same release identity. The v0.8 development package
+metadata is not published.

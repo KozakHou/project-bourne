@@ -240,6 +240,14 @@ _PBS_ALLOCATION_ENV = {
     "PBS_NP": "processors",
     "PBS_NUM_NODES": "nodes",
 }
+_LSF_ALLOCATION_ENV = {
+    "LSB_JOBID": "job_id",
+    "LSB_QUEUE": "queue",
+    "LSB_DJOB_NUMPROC": "processors",
+    "LSB_HOSTS": "hosts",
+    "LSB_MCPU_HOSTS": "host_slots",
+    "LSB_GPU_REQ": "gpu_request",
+}
 
 
 def _allocation(environment: Mapping[str, str]) -> dict[str, Any]:
@@ -258,6 +266,15 @@ def _allocation(environment: Mapping[str, str]) -> dict[str, Any]:
             **{
                 field: value
                 for variable, field in _PBS_ALLOCATION_ENV.items()
+                if (value := environment.get(variable))
+            },
+        }
+    if environment.get("LSB_JOBID"):
+        return {
+            "scheduler": "lsf",
+            **{
+                field: value
+                for variable, field in _LSF_ALLOCATION_ENV.items()
                 if (value := environment.get(variable))
             },
         }
@@ -1057,6 +1074,127 @@ class PBSProvider:
         )
 
 
+class LSFProvider:
+    """Bounded IBM LSF queue discovery without job submission or mutation."""
+
+    name = "lsf"
+    _QUEUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}\Z")
+
+    def discover(self, request: DiscoveryRequest, state: DiscoveryState) -> ProviderOutput:
+        access_target = next(
+            (item for item in state.targets if item.role == "access_target"), None
+        )
+        allocation = {
+            field: value
+            for variable, field in _LSF_ALLOCATION_ENV.items()
+            if (value := request.environment.get(variable))
+        }
+        executable = shutil.which("bqueues", path=request.environment.get("PATH"))
+        if executable is None:
+            if allocation:
+                scheduler = SchedulerResource(
+                    id=new_ulid(), snapshot_id=request.snapshot_id,
+                    access_target_id=None if access_target is None else access_target.id,
+                    family="lsf", state="allocation_observed", provider=self.name,
+                    current_allocation=allocation,
+                    metadata={"topology": "unavailable"},
+                )
+                return ProviderOutput(
+                    status="partial",
+                    diagnostic="LSF allocation observed but bqueues is unavailable",
+                    schedulers=[scheduler],
+                    evidence=[
+                        _evidence(
+                            request, subject_type="scheduler", subject_id=scheduler.id,
+                            provider=self.name, evidence_type="allocation_environment",
+                        )
+                    ],
+                )
+            return ProviderOutput(
+                status="unavailable", diagnostic="bqueues executable not found"
+            )
+        argv = [
+            executable, "-noheader", "-o",
+            "queue_name stat max jl_u njobs pend run",
+        ]
+        try:
+            result = request.runner(
+                argv, timeout=COMMAND_TIMEOUT_SECONDS,
+                max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
+            )
+        except OSError as exc:
+            return ProviderOutput(status="error", diagnostic=f"LSF query failed: {exc}")
+        if failure := _command_failure(result, "LSF queue query"):
+            return failure
+        scheduler = SchedulerResource(
+            id=new_ulid(), snapshot_id=request.snapshot_id,
+            access_target_id=None if access_target is None else access_target.id,
+            family="lsf", state="observed", provider=self.name,
+            current_allocation=allocation,
+            metadata={"topology_source": "queue_summary"},
+        )
+        hostname = platform.node() or "current-target"
+        targets: list[DiscoveredTarget] = []
+        evidence: list[DiscoveryEvidence] = [
+            _evidence(
+                request, subject_type="scheduler", subject_id=scheduler.id,
+                provider=self.name, evidence_type="read_only_queue_summary",
+            )
+        ]
+        malformed = 0
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) != 7 or self._QUEUE.fullmatch(fields[0]) is None:
+                malformed += 1
+                continue
+            queue, status, maximum, user_limit, jobs, pending, running = fields
+            target = DiscoveredTarget(
+                id=new_ulid(), snapshot_id=request.snapshot_id,
+                parent_target_id=None if access_target is None else access_target.id,
+                kind="scheduler_target_class", role="execution_target_class",
+                name=queue, locator=f"lsf://{hostname}/queue/{queue}",
+                state=status.casefold(), visible=True, authorization="unknown",
+                provider=self.name,
+                metadata={
+                    "scheduler": "lsf", "max_jobs": maximum,
+                    "max_user_jobs": user_limit, "jobs": jobs,
+                    "pending_jobs": pending, "running_jobs": running,
+                    "node_capacity": "unknown", "node_names_enumerated": False,
+                },
+            )
+            targets.append(target)
+            evidence.append(
+                _evidence(
+                    request, subject_type="target", subject_id=target.id,
+                    provider=self.name, evidence_type="scheduler_queue_summary",
+                    details={"visibility": "visible", "authorization": "unknown"},
+                )
+            )
+        if malformed and not targets:
+            return ProviderOutput(
+                status="error", diagnostic="malformed LSF queue response",
+                schedulers=[scheduler], evidence=evidence,
+            )
+        scheduler = replace(
+            scheduler, execution_target_ids=[item.id for item in targets]
+        )
+        partial = malformed > 0 or result.truncated
+        return ProviderOutput(
+            status="partial" if partial else "complete",
+            diagnostic=(
+                f"ignored {malformed} malformed queue row(s)" if malformed else None
+            ),
+            truncated=result.truncated, schedulers=[scheduler], targets=targets,
+            evidence=evidence,
+            metadata={
+                "command": argv, "job_query": "none",
+                "submission_commands": False, "cancellation_commands": False,
+            },
+        )
+
+
 class BourneHistoryProvider:
     name = "bourne_history"
 
@@ -1144,6 +1282,7 @@ def default_providers() -> list[DiscoveryProvider]:
         ModuleProvider(),
         SlurmProvider(),
         PBSProvider(),
+        LSFProvider(),
         SystemCapabilityProvider(),
         BourneHistoryProvider(),
     ]

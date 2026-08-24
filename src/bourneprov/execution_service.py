@@ -10,6 +10,7 @@ from .backends import (
     DEFAULT_SCHEDULER_POLL_SECONDS,
     DirectBackend,
     ExecutionBackend,
+    LSFBackend,
     PBSBackend,
     SchedulerBackend,
     SlurmBackend,
@@ -202,6 +203,8 @@ class ExecutionService:
             return SlurmBackend(self.store, self.staging_root)
         if name == "pbs":
             return PBSBackend(self.store, self.staging_root)
+        if name == "lsf":
+            return LSFBackend(self.store, self.staging_root)
         raise PlanningError(f"unsupported execution backend: {name}")
 
     def get_execution(self, execution_id: str):

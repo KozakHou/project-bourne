@@ -44,6 +44,7 @@ from .workload_references import (
     resolve_plan,
 )
 from .workload_storage import ExecutionStore
+from .planning_models import ContainerExecution, ContainerMount
 from .constraint_providers import DeclarativeConstraintProvider
 from .site_service import SitePlanningService, SiteService
 from .site_storage import SiteNotFound, SiteStore
@@ -86,9 +87,43 @@ def _nonnegative(value: str) -> int:
     return parsed
 
 
+def _container_execution(arguments: argparse.Namespace) -> ContainerExecution | None:
+    runtime = arguments.container_runtime
+    image = arguments.container_image
+    binds = arguments.container_bind
+    if (
+        runtime is None
+        and image is None
+        and arguments.container_image_digest is None
+        and not binds
+    ):
+        return None
+    if runtime is None or image is None:
+        raise ValueError("container runtime and existing image path are both required")
+    mounts: list[ContainerMount] = []
+    for raw in binds:
+        fields = raw.rsplit(":", 1)
+        mode = "ro"
+        path_specification = raw
+        if len(fields) == 2 and fields[1] in {"ro", "rw"}:
+            path_specification, mode = fields
+        paths = path_specification.split(":", 1)
+        if len(paths) != 2:
+            raise ValueError("container bind must be SOURCE:DEST[:ro|rw]")
+        mounts.append(
+            ContainerMount(
+                source=paths[0], destination=paths[1], read_only=mode == "ro"
+            )
+        )
+    return ContainerExecution(
+        runtime=runtime, image=image, mounts=tuple(mounts),
+        image_digest=arguments.container_image_digest,
+    )
+
+
 def _add_planning_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--request", metavar="FILE", help="load ExecutionRequest JSON")
-    parser.add_argument("--backend", choices=("auto", "direct", "slurm", "pbs"))
+    parser.add_argument("--backend", choices=("auto", "direct", "slurm", "pbs", "lsf"))
     parser.add_argument("--target")
     parser.add_argument("--context")
     parser.add_argument("--snapshot", default="latest", help="inventory ID, prefix, latest, or @N")
@@ -106,6 +141,22 @@ def _add_planning_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", metavar="FILE", help="declarative constraint-provider JSON")
     parser.add_argument("--candidate", help="explicit candidate identity to select")
     parser.add_argument("--selection-rationale", help="human/agent rationale (not evidence)")
+    parser.add_argument(
+        "--container-runtime", choices=("apptainer", "singularity"),
+        help="execute through an existing Apptainer/Singularity runtime",
+    )
+    parser.add_argument(
+        "--container-image", metavar="PATH",
+        help="absolute path to an already-present container image",
+    )
+    parser.add_argument(
+        "--container-image-digest", metavar="sha256:HEX",
+        help="optional expected digest for the existing image",
+    )
+    parser.add_argument(
+        "--container-bind", action="append", default=[], metavar="SOURCE:DEST[:ro|rw]",
+        help="bounded explicit host-to-container bind",
+    )
     parser.add_argument(
         "--approve-variant-change", action="append", default=[], metavar="PARAMETER",
         help="approve one provider-bound semantic input change",
@@ -141,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     site_add.add_argument("--ssh", dest="ssh_host", metavar="HOST")
     site_add.add_argument("--user", dest="ssh_username")
     site_add.add_argument("--port", dest="ssh_port", type=_positive)
-    site_add.add_argument("--scheduler", choices=("auto", "slurm", "pbs", "none"))
+    site_add.add_argument("--scheduler", choices=("auto", "slurm", "pbs", "lsf", "none"))
     site_add.add_argument("--local-root")
     site_add.add_argument("--remote-root")
     site_add.add_argument("--worker", dest="remote_worker_path")
@@ -269,7 +320,9 @@ def build_parser() -> argparse.ArgumentParser:
         "show", help="show validated and resolved request semantics"
     )
     request_show.add_argument("path", nargs="?", default="bourne.json")
-    request_subparsers.add_parser("schema", help="print ExecutionRequest JSON Schema v1")
+    request_subparsers.add_parser(
+        "schema", help="print the current ExecutionRequest JSON Schema"
+    )
     return parser
 
 
@@ -525,6 +578,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.provider,
                 arguments.candidate,
                 arguments.selection_rationale,
+                arguments.container_runtime,
+                arguments.container_image,
+                arguments.container_image_digest,
+                *arguments.container_bind,
                 *arguments.approve_variant_change,
                 *arguments.declare_execution_only,
                 True if arguments.trust_provider_classifications else None,
@@ -625,6 +682,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             except ExecutionRequestError as exc:
                 print(f"bourne: {exc}", file=sys.stderr)
                 return 2
+        if arguments.site is None and (
+            arguments.container_runtime is not None
+            or arguments.container_image is not None
+            or arguments.container_image_digest is not None
+            or arguments.container_bind
+        ):
+            print(
+                "bourne: container execution currently requires explicit site candidate selection",
+                file=sys.stderr,
+            )
+            return 2
         if arguments.site is not None:
             try:
                 provider = (
@@ -661,6 +729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         item: True for item in arguments.declare_execution_only
                     },
                     trusted_provider_contract=arguments.trust_provider_classifications,
+                    container=_container_execution(arguments),
                 )
                 if arguments.subcommand == "plan":
                     print(
@@ -788,12 +857,19 @@ def _print_execution_result(
         request = store.request_for_execution(result.execution_id)
         telemetry = store.telemetry(result.execution_id)
         verification = store.verification(result.execution_id)
+        runtime = store.runtime_evidence(result.execution_id)
         value.update(
             {
                 "request_id": None if request is None else request.id,
                 "telemetry": None if telemetry is None else telemetry.to_dict(),
                 "verification": (
                     None if verification is None else verification.to_dict()
+                ),
+                "runtime_evidence": (
+                    None if runtime is None else runtime[0].to_dict()
+                ),
+                "termination": (
+                    None if runtime is None else runtime[1].to_dict()
                 ),
             }
         )
@@ -806,7 +882,9 @@ def _print_execution_result(
             f"Verification: "
             f"{value.get('verification', {}).get('aggregate_state', 'unavailable') if value.get('verification') else 'unavailable'}\n"
             f"Telemetry: "
-            f"{value.get('telemetry', {}).get('state', 'off or unavailable') if value.get('telemetry') else 'off or unavailable'}"
+            f"{value.get('telemetry', {}).get('state', 'off or unavailable') if value.get('telemetry') else 'off or unavailable'}\n"
+            f"Termination: "
+            f"{value.get('termination', {}).get('outcome', 'unavailable') if value.get('termination') else 'unavailable'}"
         ),
         file=sys.stderr if not structured and result.experiment is not None else sys.stdout,
     )

@@ -5,6 +5,8 @@ Context Protocol Python SDK. MCP is an optional adapter over Bourne's existing
 structured services; it is not a second resolver, scheduler implementation, or
 execution engine. v0.7 adds typed site discovery, candidate selection, and
 exact-execution reconciliation tools while keeping the MCP process local.
+v0.8 keeps that boundary and adds ExecutionRequest v2, LSF lifecycle support,
+runtime evidence, and typed existing-image selection.
 
 ## Install and run
 
@@ -47,6 +49,7 @@ Release versions are coupled exactly:
 ```text
 @project-bourne/mcp 0.6.0 → bourneprov 0.6.0 (historical release)
 @project-bourne/mcp 0.7.0 → bourneprov 0.7.0
+@project-bourne/mcp 0.8.0-dev.0 → bourneprov 0.8.0.dev0 (source validation only)
 ```
 
 ## Discovery and Registry identity
@@ -95,7 +98,7 @@ The compact tool surface is:
 
 | Tool | Effect |
 |---|---|
-| `bourne_request_schema` | Return the packaged ExecutionRequest v1 JSON Schema. |
+| `bourne_request_schema` | Return the packaged ExecutionRequest v2 JSON Schema. |
 | `bourne_validate_request` | Validate and normalize without discovery, planning, persistence, or execution. |
 | `bourne_discover` | Run bounded discovery and add an immutable inventory snapshot. |
 | `bourne_inventory` | Read `latest`, full ID, unique prefix, or `@N`; never rediscover. |
@@ -104,7 +107,7 @@ The compact tool surface is:
 | `bourne_site_discover` | Run one bounded typed discovery operation at a configured site. |
 | `bourne_site_policy_claim` | Persist one bounded structured policy claim and provenance; accepts no shell or source-document content. |
 | `bourne_site_candidates` | Produce a bounded ephemeral candidate set without executing. |
-| `bourne_site_select` | Persist the bounded selection summary and materialize one chosen plan, including any reviewed provider-bound JSON variant. |
+| `bourne_site_select` | Persist the bounded selection summary and materialize one chosen plan, including any reviewed provider-bound JSON variant and optional typed existing-image execution. |
 | `bourne_plan` | Persist intent/workload and resolve against one existing inventory; never execute. |
 | `bourne_execute_plan` | Execute one existing immutable plan without altering it. |
 | `bourne_execution_get` | Read request, plan, lifecycle, scheduler, allocation, experiment, telemetry, and verification state. |
@@ -131,7 +134,7 @@ The primary workflow is:
 
 ```text
 MCP input
-  → canonical ExecutionRequest v1 parser
+  → canonical ExecutionRequest v2 parser
   → existing ExecutionService
   → WorkloadSpec
   → existing resolver
@@ -163,7 +166,14 @@ submission returns an execution ID, scheduler family, recorded job ID, and
 `submitted` state; it does not claim completion. Process status, verification,
 telemetry, and scientific validity remain distinct.
 
-The v0.7 server remains local stdio on Linux and macOS. It does not provide a
+Execution reads include v0.8 runtime and termination evidence when established.
+The MCP process remains on the researcher's workstation; it does not become a
+cluster-side telemetry service. Container selection accepts only typed
+Apptainer/Singularity runtime, existing image path, optional SHA-256 digest,
+bounded binds, and environment behavior. It accepts no image build/pull action
+or arbitrary shell content.
+
+The v0.8 development server remains local stdio on Linux and macOS. It does not provide a
 hosted HTTP endpoint, built-in LLM, natural-language parser, MCP Tasks mapping,
 dashboard, remote MCP service, or Windows scientific process-tree claim. AI,
 MCP, credentials, and persistent daemons are not placed on HPC systems. SQLite
