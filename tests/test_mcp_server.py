@@ -59,6 +59,85 @@ def execution_request(command: list[str], **values: object) -> dict[str, object]
     }
 
 
+@unittest.skipIf(Client is None, "install bourneprov[mcp] to run MCP schema tests")
+class MCPServerSchemaDocumentationTests(unittest.TestCase):
+    def test_site_tool_schema_documents_parameters_lifecycle_and_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = create_mcp_server(
+                BourneAgentService(root / "bourne.sqlite3", cwd=root)
+            )
+            listed = asyncio.run(server.list_tools())
+
+        by_name = {tool.name: tool for tool in listed}
+        documented_parameters = {
+            "bourne_site_discover": {"reference"},
+            "bourne_site_policy_claim": {"reference", "claim"},
+            "bourne_site_candidates": {
+                "reference", "request", "provider", "inventory_reference",
+            },
+            "bourne_site_select": {
+                "request_id", "candidate_id", "selection_source", "rationale",
+                "variant_approvals", "explicit_user_declarations",
+                "trusted_provider_contract", "container",
+            },
+        }
+        for tool_name, parameter_names in documented_parameters.items():
+            properties = by_name[tool_name].input_schema["properties"]
+            for parameter_name in parameter_names:
+                self.assertTrue(
+                    properties[parameter_name].get("description"),
+                    f"{tool_name}.{parameter_name} requires an MCP description",
+                )
+
+        description_boundaries = {
+            "bourne_site_discover": (
+                "bourne_discover", "bourne_site_inspect", "never executes",
+            ),
+            "bourne_site_policy_claim": (
+                "bourne_site_discover", "fetches no URL", "previous claims",
+            ),
+            "bourne_site_candidates": (
+                "bourne_site_select", "bourne_plan", "ephemeral candidate session",
+            ),
+            "bourne_site_select": (
+                "bourne_site_candidates", "bourne_execute_plan", "server restart",
+            ),
+        }
+        for tool_name, fragments in description_boundaries.items():
+            description = by_name[tool_name].description
+            for fragment in fragments:
+                self.assertIn(fragment, description)
+
+        policy_schema = by_name["bourne_site_policy_claim"].input_schema
+        claim_schema = policy_schema["properties"]["claim"]
+        if "$ref" in claim_schema:
+            claim_schema = policy_schema["$defs"]["SitePolicyClaimDocument"]
+        for name, value in claim_schema["properties"].items():
+            self.assertTrue(
+                value.get("description"),
+                f"SitePolicyClaimDocument.{name} requires an MCP description",
+            )
+        applicability_schema = policy_schema["$defs"]["PolicyApplicabilityDocument"]
+        for name, value in applicability_schema["properties"].items():
+            self.assertTrue(
+                value.get("description"),
+                f"PolicyApplicabilityDocument.{name} requires an MCP description",
+            )
+
+        selection_schema = by_name["bourne_site_select"].input_schema
+        for model_name in ("ContainerExecutionDocument", "ContainerMountDocument"):
+            model_schema = selection_schema["$defs"][model_name]
+            for name, value in model_schema["properties"].items():
+                self.assertTrue(
+                    value.get("description"),
+                    f"{model_name}.{name} requires an MCP description",
+                )
+        self.assertNotIn("command", claim_schema["properties"])
+        self.assertNotIn("content", claim_schema["properties"])
+        self.assertNotIn("shell", " ".join(by_name))
+
+
 @unittest.skipIf(Client is None, "install bourneprov[mcp] to run MCP integration tests")
 class MCPServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_surface_schemas_outputs_and_annotations(self) -> None:
@@ -86,13 +165,6 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_name["bourne_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execute_plan"].annotations.destructive_hint)
         self.assertTrue(by_name["bourne_execution_cancel"].annotations.destructive_hint)
-        policy_schema = by_name["bourne_site_policy_claim"].input_schema
-        claim_schema = policy_schema["properties"]["claim"]
-        if "$ref" in claim_schema:
-            claim_schema = policy_schema["$defs"]["SitePolicyClaimDocument"]
-        self.assertNotIn("command", claim_schema["properties"])
-        self.assertNotIn("content", claim_schema["properties"])
-        self.assertNotIn("shell", " ".join(by_name))
         self.assertEqual(
             response.structured_content["data"]["schema"],
             execution_request_schema(),
