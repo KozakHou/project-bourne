@@ -17,10 +17,12 @@ from .models import (
     GitProvenance,
     SystemProvenance,
 )
+from .runtime_evidence import RuntimeEvidence, TerminationEvidence
 from .workload_models import AllocationObservation
 
 RELEASED_V04_RESULT_SCHEMA_VERSION = 1
-RESULT_SCHEMA_VERSION = 2
+RELEASED_V05_RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 MAX_RESULT_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_RESULT_ARTIFACTS = 4096
 MAX_RESULT_LINEAGE = 16
@@ -44,6 +46,8 @@ class WorkerResult:
     request_id: str | None = None
     telemetry: ExecutionTelemetrySummary | None = None
     verification: VerificationRun | None = None
+    runtime_evidence: RuntimeEvidence | None = None
+    termination: TerminationEvidence | None = None
     protocol_version: int = RESULT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,6 +76,17 @@ class WorkerResult:
                         None
                         if self.verification is None
                         else self.verification.to_dict()
+                    ),
+                }
+            )
+        if self.protocol_version >= 3:
+            value.update(
+                {
+                    "runtime_evidence": (
+                        None if self.runtime_evidence is None else self.runtime_evidence.to_dict()
+                    ),
+                    "termination": (
+                        None if self.termination is None else self.termination.to_dict()
                     ),
                 }
             )
@@ -112,6 +127,7 @@ def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
     protocol_version = value.get("schema_version")
     if protocol_version not in {
         RELEASED_V04_RESULT_SCHEMA_VERSION,
+        RELEASED_V05_RESULT_SCHEMA_VERSION,
         RESULT_SCHEMA_VERSION,
     }:
         raise WorkerResultError("unsupported worker result schema")
@@ -160,7 +176,7 @@ def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
     request_id: str | None = None
     telemetry: ExecutionTelemetrySummary | None = None
     verification: VerificationRun | None = None
-    if protocol_version == RESULT_SCHEMA_VERSION:
+    if protocol_version in {RELEASED_V05_RESULT_SCHEMA_VERSION, RESULT_SCHEMA_VERSION}:
         raw_request_id = value.get("request_id")
         if not isinstance(raw_request_id, str) or not raw_request_id:
             raise WorkerResultError("worker result request ID is invalid")
@@ -197,6 +213,31 @@ def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
                     or outcome.experiment_id != experiment.id
                 ):
                     raise WorkerResultError("worker outcome relationships do not match")
+    runtime_evidence: RuntimeEvidence | None = None
+    termination: TerminationEvidence | None = None
+    if protocol_version == RESULT_SCHEMA_VERSION:
+        try:
+            raw_runtime = value.get("runtime_evidence")
+            runtime_evidence = (
+                None if raw_runtime is None
+                else RuntimeEvidence.from_dict(_object(raw_runtime, "runtime evidence"))
+            )
+            raw_termination = value.get("termination")
+            termination = (
+                None if raw_termination is None
+                else TerminationEvidence.from_dict(_object(raw_termination, "termination evidence"))
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkerResultError(f"worker runtime evidence is invalid: {exc}") from exc
+        if runtime_evidence is None or termination is None:
+            raise WorkerResultError("version-3 worker result requires runtime and termination evidence")
+        if (
+            runtime_evidence.execution_id != execution_id
+            or runtime_evidence.experiment_id != (
+                None if experiment is None else experiment.id
+            )
+        ):
+            raise WorkerResultError("runtime evidence relationships do not match")
     return WorkerResult(
         execution_id=execution_id, state=state, created_at=created_at,
         experiment=experiment, artifacts=artifacts, lineage=lineage,
@@ -204,6 +245,8 @@ def parse_worker_result(value: object, execution_id: str) -> WorkerResult:
         request_id=request_id,
         telemetry=telemetry,
         verification=verification,
+        runtime_evidence=runtime_evidence,
+        termination=termination,
         protocol_version=protocol_version,
     )
 

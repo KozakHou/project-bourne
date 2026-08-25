@@ -115,6 +115,26 @@ class SitePolicyClaimDocument(BaseModel):
     ] | None = None
 
 
+class ContainerMountDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: Annotated[str, Field(min_length=1, max_length=16384)]
+    destination: Annotated[str, Field(min_length=1, max_length=16384)]
+    read_only: bool = True
+
+
+class ContainerExecutionDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtime: Literal["apptainer", "singularity"]
+    image: Annotated[str, Field(min_length=1, max_length=16384)]
+    mounts: list[ContainerMountDocument] = Field(default_factory=list, max_length=128)
+    clean_environment: bool = True
+    image_digest: Annotated[
+        str, Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    ] | None = None
+
+
 class ProductError(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -210,7 +230,7 @@ def create_mcp_server(
 
     @server.tool(
         name="bourne_request_schema",
-        description="Return Bourne's canonical ExecutionRequest version-1 JSON Schema.",
+        description="Return Bourne's canonical ExecutionRequest version-2 JSON Schema.",
         annotations=_annotation(read_only=True, idempotent=True),
         structured_output=True,
     )
@@ -220,7 +240,7 @@ def create_mcp_server(
     @server.tool(
         name="bourne_validate_request",
         description=(
-            "Validate and normalize an ExecutionRequest v1 without discovery, "
+            "Validate and normalize an ExecutionRequest v2 without discovery, "
             "planning, persistence, or execution."
         ),
         annotations=_annotation(read_only=True, idempotent=True),
@@ -342,6 +362,7 @@ def create_mcp_server(
         variant_approvals: list[str] | None = None,
         explicit_user_declarations: list[str] | None = None,
         trusted_provider_contract: bool = False,
+        container: ContainerExecutionDocument | None = None,
     ) -> ToolResult:
         return await call(
             "site_select",
@@ -351,6 +372,9 @@ def create_mcp_server(
                 variant_approvals=variant_approvals,
                 explicit_user_declarations=explicit_user_declarations,
                 trusted_provider_contract=trusted_provider_contract,
+                container=(
+                    None if container is None else container.model_dump()
+                ),
             ),
             mutation=True,
         )
@@ -358,7 +382,7 @@ def create_mcp_server(
     @server.tool(
         name="bourne_plan",
         description=(
-            "Persist and resolve an ExecutionRequest v1 against an existing inventory. "
+            "Persist and resolve an ExecutionRequest v2 against an existing inventory. "
             "Planning never executes the workload and preserves ambiguity."
         ),
         annotations=_annotation(read_only=False, destructive=False),

@@ -1,4 +1,4 @@
-"""Bounded, non-executable ExecutionRequest version-1 contract."""
+"""Bounded, non-executable ExecutionRequest contract with v1 compatibility."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from .workload import utc_now
 from .workload_models import ExecutionConstraints, ResourceRequirements
 
 REQUEST_KIND = "bourne.execution-request"
-REQUEST_SCHEMA_VERSION = 1
+RELEASED_REQUEST_SCHEMA_VERSION = 1
+REQUEST_SCHEMA_VERSION = 2
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_REQUEST_ARGV = 4096
 MAX_REQUEST_STRING = 16 * 1024
@@ -142,7 +143,9 @@ class ExecutionRequest:
     def __post_init__(self) -> None:
         if self.kind != REQUEST_KIND:
             raise ExecutionRequestError(f"unsupported request kind: {self.kind}")
-        if self.request_schema_version != REQUEST_SCHEMA_VERSION:
+        if self.request_schema_version not in {
+            RELEASED_REQUEST_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION
+        }:
             raise ExecutionRequestError(
                 f"unsupported execution request version: {self.request_schema_version}"
             )
@@ -227,11 +230,11 @@ class ExecutionRequest:
         }
 
     def to_document(self) -> dict[str, Any]:
-        """Return the stable public ExecutionRequest version-1 document."""
+        """Return the stable public ExecutionRequest document."""
 
         value: dict[str, Any] = {
             "kind": REQUEST_KIND,
-            "version": REQUEST_SCHEMA_VERSION,
+            "version": self.request_schema_version,
             "command": list(self.command),
             "working_directory": self.working_directory,
         }
@@ -423,7 +426,7 @@ def parse_execution_request(
     version = root.get("version")
     if isinstance(version, bool) or not isinstance(version, int):
         raise ExecutionRequestError("request version must be an integer")
-    if version != REQUEST_SCHEMA_VERSION:
+    if version not in {RELEASED_REQUEST_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION}:
         raise ExecutionRequestError(
             f"unsupported execution request version: {version}"
         )
@@ -483,6 +486,8 @@ def parse_execution_request(
     if context is not None:
         _bounded_string(context, "execution context", allow_empty=False)
     execution = ExecutionConstraints(backend=backend, target=target, context=context)
+    if version == RELEASED_REQUEST_SCHEMA_VERSION and backend == "lsf":
+        raise ExecutionRequestError("LSF backend requires execution request version 2")
 
     provenance_value = _optional_object(root, "provenance")
     _reject_unknown(provenance_value, {"parent_experiment"}, "provenance")
@@ -524,6 +529,7 @@ def parse_execution_request(
         telemetry_mode=telemetry_mode,
         verification_checks=checks,
         source=source,
+        request_schema_version=version,
     )
 
 
@@ -632,7 +638,7 @@ def execution_request_schema() -> dict[str, Any]:
     """Return the packaged public schema without a network dependency."""
 
     resource = files("bourneprov").joinpath(
-        "schemas/execution-request-v1.schema.json"
+        "schemas/execution-request-v2.schema.json"
     )
     return json.loads(resource.read_text(encoding="utf-8"))
 

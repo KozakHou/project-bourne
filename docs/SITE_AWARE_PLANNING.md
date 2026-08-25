@@ -1,7 +1,7 @@
 # Site-Aware Constraint-Based Execution Planning
 
-Project Bourne v0.7 adds a bounded path from a local control plane to an
-existing SSH-accessible Slurm/PBS site. It does not turn Bourne into a fleet
+Project Bourne v0.7 added a bounded path from a local control plane to an
+existing SSH-accessible Slurm/PBS/LSF site. It does not turn Bourne into a fleet
 manager or remote shell.
 
 ## Deployment roles
@@ -25,10 +25,10 @@ HPC login / access node
         ├─ validates the plan
         ├─ verifies staged file digests
         ├─ stages the execution bundle
-        └─ submits with sbatch / qsub
+        └─ submits with sbatch / qsub / bsub
         ▼
 
-Slurm / PBS
+Slurm / PBS / IBM LSF
         │
         │ allocates resources
         ▼
@@ -65,18 +65,19 @@ candidate exploration, selection provenance, execution history, and later
 reconciliation. The remote worker accepts only typed protocol-v1 operations:
 `hello`, `discover`, `validate_plan`, `prepare`, `submit`, `reconcile`,
 `collect`, and `cancel`. The compute worker remains the scheduler-staged,
-stdlib-only worker introduced for local Slurm/PBS execution.
+stdlib-only worker introduced for local Slurm/PBS execution and extended for LSF.
 
 The Remote Worker and Compute Worker are not agents or persistent services;
 both are short-lived, versioned Bourne workers. Bourne does not SSH directly
-into compute nodes. Slurm/PBS places the Compute Worker inside the allocation
+into compute nodes. Slurm/PBS/LSF places the Compute Worker inside the allocation
 and owns job lifetime after acceptance. The researcher's workstation /
 control plane may disconnect and reconcile later. No AI, MCP server, AI
 credential, inbound port, root access, persistent daemon, or public-internet
 access is required on HPC.
 
-The remote-worker protocol is v1, the worker-result protocol is v2, and the
-staged-plan protocol is v3.
+The remote-worker protocol remains v1. v0.8 uses worker-result v3 and
+staged-plan v4, with backward readers for released result v1/v2 and staged-plan
+v1/v2/v3 payloads.
 
 There is no remote `exec`, arbitrary command, scheduler-command, MCP, HTTP, or
 daemon operation.
@@ -91,8 +92,10 @@ token, or host-key bypass.
 The OpenSSH adapter invokes local `ssh` and `scp` using exact argv with
 `shell=False`. It deliberately does not set `StrictHostKeyChecking`, replace
 the known-hosts file, select private key material, or implement authentication.
-OpenSSH configuration, agent/key access, prompts, VPN, MFA, host trust, and
-authorization remain the user's/site's responsibility.
+OpenSSH configuration—including `Host`, `HostName`, `User`, `Port`,
+`IdentityFile`, and `ProxyJump`—agent/key access, prompts, VPN, MFA, host trust,
+and authorization remain the user's/site's responsibility. Bourne does not
+parse or reimplement `~/.ssh/config`.
 
 The login-node worker can be:
 
@@ -265,14 +268,24 @@ the experiment is `not_started`, and scientific argv is never launched.
 There is deliberately no `pip/conda/mamba/spack/apt/yum/dnf/brew install`,
 `sudo`, configure/make, CMake/build, or dependency compilation path.
 
+## Existing container images only
+
+v0.8 can bind an already-existing Apptainer/Singularity image to the selected
+immutable plan. The compute worker rechecks the runtime, image, optional
+SHA-256 digest, and bounded bind sources before executing exact scientific
+argv. It does not build, pull, install, convert, or manage images and does not
+require Docker. It does not orchestrate multi-node container launch, choose
+MPI-launcher/container ordering, or inject MPI launchers. See
+[Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md).
+
 ## Submission ownership and ambiguous transport
 
-The execution ULID exists before `sbatch`/`qsub`. Remote staging and an atomic
+The execution ULID exists before `sbatch`/`qsub`/`bsub`. Remote staging and an atomic
 submission-state document are keyed by it. The remote worker writes
 `submitting` before calling the scheduler and `submitted` with the exact job ID
 after a parseable acceptance.
 
-After acceptance, Slurm/PBS—not Bourne—owns job lifetime. Bourne starts no
+After acceptance, Slurm/PBS/LSF—not Bourne—owns job lifetime. Bourne starts no
 keepalive. The researcher's workstation / control plane may disconnect. On
 reconnect, `execution wait` or the structured reconcile operation reads the
 exact remote execution state, queries only the exact Bourne-owned scheduler
@@ -288,8 +301,8 @@ If transport fails after the scheduler may have accepted:
   reconciled;
 - missing scheduler/result evidence never becomes completion.
 
-Remote machines without Slurm/PBS may be discovered and used for planning.
-v0.7 does not claim disconnect-safe direct remote execution and adds no nohup,
+Remote machines without Slurm/PBS/LSF may be discovered and used for planning.
+v0.8 does not claim disconnect-safe direct remote execution and adds no nohup,
 tmux, screen, systemd-user service, daemon, or process supervisor.
 
 ## Data boundary and current limits
@@ -302,7 +315,7 @@ Large scientific data may remain on the HPC filesystem.
 
 Current limitations include Python 3 on login/compute nodes, a configured
 remote project/staging root for execution, site-dependent module-shell
-behavior, common Slurm/PBS command formats rather than every vendor variant,
+behavior, common Slurm/PBS/LSF command formats rather than every vendor variant,
 and no scheduler-free disconnect-safe runtime. Resource shapes and policy
 claims are bounded evidence, not proof of future scheduler admission.
 

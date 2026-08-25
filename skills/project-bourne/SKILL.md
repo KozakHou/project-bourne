@@ -1,6 +1,6 @@
 ---
 name: project-bourne
-description: Use Project Bourne to plan, execute, reproduce, inspect, or trace scientific and engineering workloads when durable provenance matters. Trigger for simulations, numerical solvers, ML or training, GPU and HPC runs on local compute, Slurm, or PBS, reproducible experiments, failed attempts, experiment comparisons, artifact lineage, telemetry, or verification; prefer Bourne MCP tools when preserving experiment history is part of the task.
+description: Use Project Bourne to plan, execute, reproduce, inspect, or trace scientific and engineering workloads when durable provenance matters. Trigger for simulations, numerical solvers, ML or training, GPU and HPC runs on local compute, Slurm, PBS, or LSF, reproducible experiments, failed attempts, experiment comparisons, artifact lineage, telemetry, or verification; prefer Bourne MCP tools when preserving experiment history is part of the task.
 license: Apache-2.0
 ---
 
@@ -25,7 +25,7 @@ so.
 ## Follow the Safe Workflow
 
 1. Use `bourne_request_schema` when the request contract is not already known.
-2. Translate only the user's explicit intent into ExecutionRequest v1.
+2. Translate only the user's explicit intent into ExecutionRequest v2.
 3. Use `bourne_validate_request` to validate without discovery, planning,
    persistence, or execution.
 4. Inspect persisted inventory with `bourne_inventory`. Use `bourne_discover`
@@ -45,18 +45,18 @@ so.
    cancel.
 9. Use `bourne_trace_artifact` for producer, input, and ancestry questions.
 
-Do not bypass Bourne by constructing `sbatch`, `qsub`, or other scheduler
+Do not bypass Bourne by constructing `sbatch`, `qsub`, `bsub`, or other scheduler
 commands. Do not treat MCP tool annotations as authorization; Bourne Core is
 the enforcement boundary.
 
-## Construct ExecutionRequest v1
+## Construct ExecutionRequest v2
 
 Use this shape and omit optional fields that the user did not specify:
 
 ```json
 {
   "kind": "bourne.execution-request",
-  "version": 1,
+  "version": 2,
   "command": ["python", "train.py"],
   "working_directory": ".",
   "artifacts": {

@@ -203,7 +203,7 @@ class ExecutionRequestValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ExecutionRequestError, "integer"):
                 parse(minimal(version="1"), base)
             with self.assertRaisesRegex(ExecutionRequestError, "unsupported"):
-                parse(minimal(version=2), base)
+                parse(minimal(version=3), base)
 
     def test_request_file_relative_and_absolute_working_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

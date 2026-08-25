@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 from pathlib import Path
-from typing import Mapping, Sequence, TextIO
+from typing import Any, Mapping, MutableSequence, Sequence, TextIO
 
 from .artifacts import capture_artifacts
 from .collectors import collect_execution_context, collect_git, collect_system
@@ -61,6 +61,8 @@ def run_experiment(
     stderr_stream: TextIO | None = None,
     experiment_id: str | None = None,
     environment: Mapping[str, str] | None = None,
+    runtime_capture_out: MutableSequence[dict[str, Any]] | None = None,
+    capture_limit_bytes: int | None = None,
 ) -> Experiment:
     """Collect pre-execution provenance and run one experiment."""
 
@@ -81,7 +83,22 @@ def run_experiment(
         stdout_stream=stdout_stream,
         stderr_stream=stderr_stream,
         environment=environment,
+        collect_runtime=runtime_capture_out is not None,
+        capture_limit_bytes=capture_limit_bytes,
     )
+    if runtime_capture_out is not None:
+        runtime_capture_out.append(
+            {
+                **execution.runtime_capture,
+                "termination_signal": execution.termination_signal,
+                "launch_error": execution.launch_error,
+                "started_at": execution.started_at,
+                "ended_at": execution.ended_at,
+                "duration_seconds": execution.duration_seconds,
+                "exit_code": execution.exit_code,
+                "status": execution.status,
+            }
+        )
 
     return Experiment(
         id=public_id,

@@ -24,12 +24,13 @@ These identities are deliberately separate:
 
 ## JSON contract
 
-The first external request contract is:
+The current additive request contract is version 2. Released version 1 remains
+readable; version 2 adds only the explicit IBM LSF backend choice.
 
 ```json
 {
   "kind": "bourne.execution-request",
-  "version": 1,
+  "version": 2,
   "command": ["python", "train.py"],
   "working_directory": ".",
   "artifacts": {
@@ -74,9 +75,10 @@ bourne request schema
 ```
 
 The source file is
-`src/bourneprov/schemas/execution-request-v1.schema.json`. No network access or
-`jsonschema` dependency is needed at runtime; Bourne uses a matching bounded
-standard-library validator.
+`src/bourneprov/schemas/execution-request-v2.schema.json`. The released v1
+schema remains packaged for compatibility. No network access or `jsonschema`
+dependency is needed at runtime; Bourne uses a matching bounded standard-library
+validator.
 
 ## CLI
 
@@ -146,7 +148,7 @@ request, workload, and plan persistence.
 
 ## Validation and bounds
 
-Version 1 rejects unknown fields at every semantic object boundary so a typo
+Version 2 rejects unknown fields at every semantic object boundary so a typo
 such as `"gpu": 4` cannot silently become an unconstrained request. It also
 rejects duplicate JSON object keys.
 
@@ -180,8 +182,8 @@ request identity with equivalent semantics rather than mutating history.
 
 ## Summary telemetry
 
-Telemetry policy is `summary` by default or `off`. Summary mode samples
-nothing and adds no profiler. It derives only facts Bourne already captured:
+Telemetry policy is `summary` by default or `off`. The original summary object
+samples nothing and adds no profiler. It derives only facts Bourne already captured:
 
 - experiment wall duration;
 - UTF-8 byte counts of captured stdout and stderr;
@@ -194,9 +196,10 @@ nothing and adds no profiler. It derives only facts Bourne already captured:
 
 Each summary identifies its evidence sources and coverage. Requested resources
 are constraints, allocated resources are infrastructure observations, and
-neither is utilization. Bourne makes no CPU, GPU, memory, I/O, whole-node, or
-process-tree utilization claim in v0.5. An unavailable metric remains `null`
-and is listed as unavailable; it is never represented as zero.
+neither is utilization. v0.8 adds a separate versioned runtime-evidence record
+owned by the execution-scoped Compute Worker. Linux process-tree CPU, peak RSS,
+and process I/O samples carry explicit partial coverage; unavailable values are
+not represented as zeros. See [Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md).
 
 ## Deterministic verification
 
@@ -229,21 +232,23 @@ domain-specific scientific validity.
 
 ## Scheduler and protocol compatibility
 
-New staged plans and worker results use protocol version 2 when linked to a
-v0.5 request. The staged request identity, telemetry policy, and verification
+v0.8 uses staged-plan v4 only when an immutable existing-image container
+execution is present and worker-result v3 for runtime/termination evidence.
+Released staged-plan v1/v2/v3 and worker-result v1/v2 payloads remain readable.
+The staged request identity, telemetry policy, and verification
 checks are structurally validated and must match the immutable workload and
 plan. The compute worker captures artifacts, builds the low-overhead summary,
 and evaluates checks on the execution plane. The controller validates all
 relationships and imports the experiment, allocation, telemetry, verification
 run, and check rows transactionally.
 
-The v0.5 worker and controller still read released v0.4 staged-plan/result
-protocol version 1. A request-less v0.4 plan remains valid; its result does not
-invent v0.5 request, telemetry, or verification history.
+The remote-worker protocol remains v1. A request-less v0.4 plan remains valid;
+its result does not invent request, telemetry, verification, runtime, or
+termination history.
 
 ## Persistence
 
-SQLite schema 5 adds only:
+SQLite schema 5 added:
 
 - `execution_requests`;
 - `execution_request_workload_links`;
@@ -254,12 +259,16 @@ SQLite schema 5 adds only:
 Existing schema-4 facts remain in their original tables. Migration does not
 reverse-engineer old plans into fictional requests.
 
+SQLite schema 7 adds runtime/termination evidence and admits the version-2 LSF
+request/backend values. Released schema-6 data is migrated transactionally and
+foreign-key checked; old requests remain version 1.
+
 ## Future producers
 
 The request model and JSON Schema are the integration boundary for future MCP,
 TypeScript/npm, Skills, or natural-language agents. Such a producer should
-construct or validate ExecutionRequest v1 and call Bourne's structured
+construct or validate ExecutionRequest v2 and call Bourne's structured
 services. It should not duplicate workload inspection, inventory resolution,
 scheduler submission, execution supervision, artifact capture, telemetry, or
-verification logic. None of those future producer packages is implemented in
-v0.5.
+verification logic. MCP, TypeScript/npm, and the portable Skill now use this
+same structured boundary; they do not duplicate Core behavior.

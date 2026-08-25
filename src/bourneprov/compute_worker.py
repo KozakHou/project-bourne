@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import platform
 import re
@@ -18,23 +19,38 @@ from .ids import new_ulid
 from .execution_outcomes import build_telemetry_summary, evaluate_verification
 from .execution_request import ExecutionRequest
 from .lifecycle import run_experiment
-from .models import ExperimentLineage
+from .models import ExperimentLineage, SystemProvenance
+from .runtime_evidence import (
+    RuntimeEvidence,
+    RuntimeEvidenceGroup,
+    TerminationEvidence,
+)
 from .worker_result import WorkerResult, encode_worker_result
 from .workload import utc_now
 from .workload_models import AllocationObservation, ExecutionPlan, WorkloadSpec
 
 MAX_PLAN_BYTES = 1024 * 1024
+MAX_CAPTURE_BYTES_PER_STREAM = 8 * 1024 * 1024
+MAX_ALLOCATION_ENVIRONMENT_VALUE = 16 * 1024
 _ALLOCATION_ENVIRONMENT = {
     "SLURM_JOB_ID": "slurm_job_id",
     "SLURM_JOB_PARTITION": "slurm_partition",
     "SLURM_JOB_NUM_NODES": "nodes",
-    "SLURM_CPUS_ON_NODE": "cpus_per_node",
+    "SLURM_CPUS_ON_NODE": "slurm_cpus_on_node",
+    "SLURM_JOB_CPUS_PER_NODE": "slurm_job_cpus_per_node",
+    "SLURM_JOB_NODELIST": "slurm_job_nodelist",
     "SLURM_NTASKS": "mpi_ranks",
     "SLURM_GPUS": "slurm_gpus",
     "PBS_JOBID": "pbs_job_id",
     "PBS_QUEUE": "pbs_queue",
     "PBS_NP": "cpus",
     "PBS_NODEFILE": "pbs_nodefile",
+    "LSB_JOBID": "lsf_job_id",
+    "LSB_QUEUE": "lsf_queue",
+    "LSB_HOSTS": "lsf_hosts",
+    "LSB_MCPU_HOSTS": "lsf_mcpu_hosts",
+    "LSB_DJOB_NUMPROC": "mpi_ranks",
+    "LSB_GPU_REQ": "lsf_gpu_request",
     "CUDA_VISIBLE_DEVICES": "cuda_visible_devices",
 }
 
@@ -67,24 +83,38 @@ def execute_plan(
     allocation = _observe_allocation(execution_id, direct=plan.backend == "direct")
     problems, preflight, environment = _preflight(plan, allocation)
     if problems:
+        runtime = _runtime_evidence(
+            execution_id, None, {}, allocation, preflight, plan
+        )
         return WorkerResult(
             execution_id=execution_id, state="preflight_failed", created_at=utc_now(),
             experiment=None, artifacts=[], lineage=[], allocation=allocation,
             preflight={**preflight, "status": "failed", "problems": problems},
             error="; ".join(problems),
             request_id=None if request is None else request.id,
-            protocol_version=1 if request is None else 2,
+            runtime_evidence=runtime,
+            termination=TerminationEvidence(
+                phase="preflight", outcome="preflight_failed",
+                source="compute_worker_preflight", result_evidence="missing",
+                telemetry_evidence="unavailable", diagnostic="; ".join(problems),
+            ),
+            protocol_version=1 if request is None else 3,
         )
     cwd = Path(plan.working_directory)
     experiment_id = new_ulid()
     inputs = capture_artifacts(experiment_id, "input", list(plan.inputs), cwd)
+    runtime_capture: list[dict[str, Any]] = []
+    collect_runtime = request is not None and request.telemetry_mode != "off"
+    execution_argv = _execution_argv(plan)
     experiment = run_experiment(
-        plan.argv,
+        execution_argv,
         cwd=cwd,
         stdout_stream=sys.stdout if stdout_stream is None else stdout_stream,
         stderr_stream=sys.stderr if stderr_stream is None else stderr_stream,
         experiment_id=experiment_id,
         environment=environment,
+        runtime_capture_out=runtime_capture if collect_runtime else None,
+        capture_limit_bytes=MAX_CAPTURE_BYTES_PER_STREAM,
     )
     outputs = capture_artifacts(experiment_id, "output", list(plan.outputs), cwd)
     lineage = (
@@ -112,6 +142,35 @@ def execute_plan(
             request, execution_id, experiment, [*inputs, *outputs]
         )
     )
+    runtime = (
+        None
+        if request is None
+        else _runtime_evidence(
+            execution_id, experiment.id,
+            (
+                runtime_capture[0]
+                if runtime_capture
+                else {
+                    "collector": "disabled",
+                    "diagnostic": "runtime collection was disabled by the execution request",
+                }
+            ),
+            allocation, preflight, plan,
+            system=experiment.system,
+        )
+    )
+    termination = (
+        None
+        if request is None
+        else _termination_evidence(
+            experiment,
+            runtime_capture[0] if runtime_capture else {
+                "collector": "disabled",
+                "diagnostic": "runtime collection was disabled by the execution request",
+            },
+            verification,
+        )
+    )
     return WorkerResult(
         execution_id=execution_id, state=experiment.status,
         created_at=experiment.ended_at, experiment=experiment,
@@ -120,7 +179,9 @@ def execute_plan(
         request_id=None if request is None else request.id,
         telemetry=telemetry,
         verification=verification,
-        protocol_version=1 if request is None else 2,
+        runtime_evidence=runtime,
+        termination=termination,
+        protocol_version=1 if request is None else 3,
     )
 
 
@@ -130,7 +191,7 @@ def _load_plan(
     if path.stat().st_size > MAX_PLAN_BYTES:
         raise ValueError("staged plan exceeds the size limit")
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2, 3}:
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2, 3, 4}:
         raise ValueError("unsupported staged plan")
     if value.get("execution_id") != execution_id:
         raise ValueError("staged plan execution ID does not match")
@@ -142,7 +203,7 @@ def _load_plan(
     plan = ExecutionPlan.from_dict(plan_value)
     workload = WorkloadSpec.from_dict(workload_value)
     request_value = value.get("request")
-    if value["schema_version"] in {2, 3}:
+    if value["schema_version"] in {2, 3, 4}:
         if not isinstance(request_value, dict):
             raise ValueError("version-2 staged plan requires an execution request")
         request = ExecutionRequest.from_dict(request_value)
@@ -178,7 +239,7 @@ def _load_plan(
 def _validate_staged_models(
     plan: dict[str, Any], workload: dict[str, Any]
 ) -> None:
-    if plan.get("backend") not in {"direct", "slurm", "pbs"}:
+    if plan.get("backend") not in {"direct", "slurm", "pbs", "lsf"}:
         raise ValueError("staged plan backend is invalid")
     for value, label in ((plan, "plan"), (workload, "workload")):
         if not isinstance(value.get("id"), str):
@@ -200,19 +261,46 @@ def _validate_staged_models(
 def _observe_allocation(
     execution_id: str, *, direct: bool = False
 ) -> AllocationObservation:
-    raw = {
-        field: value
-        for variable, field in _ALLOCATION_ENVIRONMENT.items()
-        if (value := os.environ.get(variable)) is not None
-    }
+    oversized_fields: list[str] = []
+    raw: dict[str, str] = {}
+    for variable, field in _ALLOCATION_ENVIRONMENT.items():
+        value = os.environ.get(variable)
+        if value is None:
+            continue
+        if len(value) > MAX_ALLOCATION_ENVIRONMENT_VALUE:
+            oversized_fields.append(field)
+            continue
+        raw[field] = value
     resources: dict[str, Any] = {}
-    for key in ("nodes", "cpus_per_node", "mpi_ranks", "cpus"):
+    for key in ("nodes", "mpi_ranks", "cpus"):
         if key in raw:
             parsed = _positive_int(raw[key])
             if parsed is not None:
                 resources[key] = parsed
-    if "nodes" in resources and "cpus_per_node" in resources:
-        resources["cpus"] = resources["nodes"] * resources["cpus_per_node"]
+    slurm_cpu_layout = _parse_slurm_cpus_per_node(
+        raw.get("slurm_job_cpus_per_node")
+    )
+    if slurm_cpu_layout is not None:
+        resources["cpus_per_node_allocation"] = slurm_cpu_layout
+        resources["cpus"] = sum(slurm_cpu_layout)
+        resources.setdefault("nodes", len(slurm_cpu_layout))
+        if len(set(slurm_cpu_layout)) == 1:
+            resources["cpus_per_node"] = slurm_cpu_layout[0]
+    local_slurm_cpus = _positive_int(raw.get("slurm_cpus_on_node", ""))
+    if local_slurm_cpus is not None:
+        resources["local_cpus_on_node"] = local_slurm_cpus
+        if resources.get("nodes") == 1 and slurm_cpu_layout is None:
+            resources["cpus_per_node"] = local_slurm_cpus
+            resources["cpus"] = local_slurm_cpus
+    if value := raw.get("lsf_mcpu_hosts"):
+        fields = value.split()
+        if len(fields) % 2 == 0:
+            slots = [_positive_int(item) for item in fields[1::2]]
+            if all(item is not None for item in slots):
+                resources["nodes"] = len(fields) // 2
+                resources["cpus"] = sum(int(item) for item in slots if item is not None)
+    elif value := raw.get("lsf_hosts"):
+        resources["nodes"] = len(set(value.split()))
     gpu_count = _allocated_gpu_count(raw)
     if gpu_count is not None:
         resources["gpus"] = gpu_count
@@ -225,10 +313,34 @@ def _observe_allocation(
             resources["gpus"] = len(collect_system().gpus)
         except Exception:
             pass
+    hosts = _allocation_hosts(raw)
+    local_host = platform.node() or "unknown"
+    if hosts:
+        host_scope = "allocation"
+    elif raw.get("slurm_job_nodelist"):
+        host_scope = "allocation"
+    elif direct or any(
+        key in raw
+        for key in (
+            "slurm_job_id", "pbs_job_id", "lsf_job_id", "slurm_cpus_on_node"
+        )
+    ):
+        host_scope = "local_only"
+        hosts = [local_host]
+    else:
+        # The worker always knows its own execution host, but that local fact
+        # must never be presented as the complete scheduler allocation.
+        host_scope = "local_only"
+        hosts = [local_host]
     return AllocationObservation(
         id=new_ulid(), execution_id=execution_id, observed_at=utc_now(),
-        resources=resources, hosts=[platform.node() or "unknown"],
-        evidence={"environment": raw, "source": "compute_worker_allowlist"},
+        resources=resources, hosts=hosts,
+        evidence={
+            "environment": raw,
+            "source": "compute_worker_allowlist",
+            "host_scope": host_scope,
+            "oversized_fields_omitted": oversized_fields,
+        },
     )
 
 
@@ -237,6 +349,7 @@ def _preflight(
     allocation: AllocationObservation,
 ) -> tuple[list[str], dict[str, Any], dict[str, str]]:
     problems: list[str] = []
+    observed_image_digest: str | None = None
     environment, activation_evidence, activation_problem = _activation_environment(plan)
     if activation_problem is not None:
         problems.append(activation_problem)
@@ -245,15 +358,29 @@ def _preflight(
         cwd_ok = cwd.is_dir()
     except OSError:
         cwd_ok = False
+    requested_executable = (
+        plan.container.runtime if plan.container is not None else plan.executable
+    )
     resolved = (
-        _resolve_with_environment(plan.executable, cwd, environment)
+        _resolve_with_environment(requested_executable, cwd, environment)
         if cwd_ok and activation_problem is None
         else None
     )
     if not cwd_ok:
         problems.append("working directory is unavailable on the execution host")
     elif resolved is None:
-        problems.append("requested executable is unavailable on the execution host")
+        problems.append("requested executable or container runtime is unavailable on the execution host")
+    if plan.container is not None:
+        image = Path(plan.container.image)
+        if not image.is_file():
+            problems.append("planned existing container image is unavailable")
+        elif plan.container.image_digest is not None:
+            observed_image_digest = "sha256:" + _sha256_file(image)
+            if observed_image_digest != plan.container.image_digest:
+                problems.append("planned container image digest does not match")
+        for mount in plan.container.mounts:
+            if not Path(mount.source).exists():
+                problems.append(f"planned container bind source is unavailable: {mount.source}")
     requested = plan.requested_resources
     if plan.resource_shape is not None:
         shape = plan.resource_shape
@@ -277,12 +404,20 @@ def _preflight(
             )
     return problems, {
         "observed_at": utc_now(), "working_directory_available": cwd_ok,
-        "requested_executable": plan.executable, "resolved_executable": resolved,
+        "requested_executable": requested_executable, "resolved_executable": resolved,
         "requested_resources": vars(requested),
         "selected_resource_shape": (
             None if plan.resource_shape is None else plan.resource_shape.to_dict()
         ),
         "environment_activation": activation_evidence,
+        "container": (
+            None
+            if plan.container is None
+            else {
+                **plan.container.to_dict(),
+                "observed_image_digest": observed_image_digest,
+            }
+        ),
         "observed_resources": allocation.resources,
     }, environment
 
@@ -371,12 +506,276 @@ def _allocated_gpu_count(raw: dict[str, str]) -> int | None:
     return digits[-1] if digits else None
 
 
+def _allocation_hosts(raw: dict[str, str]) -> list[str]:
+    if value := raw.get("lsf_mcpu_hosts"):
+        fields = value.split()
+        return list(dict.fromkeys(fields[0::2]))[:4096]
+    if value := raw.get("lsf_hosts"):
+        return list(dict.fromkeys(value.split()))[:4096]
+    nodefile = raw.get("pbs_nodefile")
+    if nodefile:
+        try:
+            path = Path(nodefile)
+            if path.stat().st_size <= 1024 * 1024:
+                return list(dict.fromkeys(path.read_text(encoding="utf-8").split()))[:4096]
+        except OSError:
+            pass
+    return []
+
+
+def _parse_slurm_cpus_per_node(value: str | None) -> list[int] | None:
+    """Expand Slurm's bounded whole-job CPU layout, such as ``72(x2),36``."""
+
+    if value is None or not value or len(value) > 16 * 1024:
+        return None
+    result: list[int] = []
+    for token in value.split(","):
+        match = re.fullmatch(
+            r"\s*([1-9][0-9]{0,9})(?:\([xX]([1-9][0-9]{0,9})\))?\s*",
+            token,
+        )
+        if match is None:
+            return None
+        cpus = int(match.group(1))
+        repetitions = int(match.group(2) or 1)
+        if repetitions > 4096 or len(result) + repetitions > 4096:
+            return None
+        result.extend([cpus] * repetitions)
+    return result or None
+
+
+def _execution_argv(plan: ExecutionPlan) -> list[str]:
+    if plan.container is None:
+        return plan.argv
+    container = plan.container
+    argv = [container.runtime, "exec"]
+    if container.clean_environment:
+        argv.append("--cleanenv")
+    argv.extend(["--pwd", plan.working_directory])
+    for mount in container.mounts:
+        specification = f"{mount.source}:{mount.destination}"
+        if mount.read_only:
+            specification += ":ro"
+        argv.extend(["--bind", specification])
+    argv.extend([container.image, *plan.argv])
+    return argv
+
+
+def _runtime_evidence(
+    execution_id: str,
+    experiment_id: str | None,
+    capture: dict[str, Any],
+    allocation: AllocationObservation,
+    preflight: dict[str, Any],
+    plan: ExecutionPlan,
+    *,
+    system: SystemProvenance | None = None,
+) -> RuntimeEvidence:
+    procfs = capture.get("collector") == "linux_procfs"
+    process = RuntimeEvidenceGroup(
+        coverage="observed" if procfs else "unavailable",
+        source="linux_procfs" if procfs else "runtime_collector",
+        metrics={
+            key: capture[key]
+            for key in (
+                "root_pid", "observed_processes", "peak_concurrent_processes",
+                "samples", "sample_interval_seconds",
+                "stdout_capture_bytes", "stderr_capture_bytes",
+                "stdout_truncated", "stderr_truncated", "capture_limit_bytes",
+            )
+            if key in capture
+        } | {
+            "resolved_executable": preflight.get("resolved_executable"),
+            "exact_argv": _execution_argv(plan),
+            "scientific_argv": plan.argv,
+            "working_directory": plan.working_directory,
+            "started_at": capture.get("started_at"),
+            "ended_at": capture.get("ended_at"),
+            "duration_seconds": capture.get("duration_seconds"),
+            "exit_code": capture.get("exit_code"),
+            "signal": capture.get("termination_signal"),
+        },
+        diagnostic=capture.get("diagnostic"),
+    )
+    sampled = "partially_observed" if procfs else "unavailable"
+    sampled_source = "linux_procfs" if procfs else "runtime_collector"
+    cpu = RuntimeEvidenceGroup(
+        coverage=sampled, source=sampled_source,
+        metrics=(
+            {"cpu_seconds": capture["cpu_seconds"]} if "cpu_seconds" in capture else {}
+        ) | {"observed_cpu_allocation": allocation.resources.get("cpus")},
+        diagnostic=(
+            "sampled execution process tree on this allocation node"
+            if procfs else capture.get("diagnostic")
+        ),
+    )
+    memory = RuntimeEvidenceGroup(
+        coverage=sampled, source=sampled_source,
+        metrics={"peak_rss_bytes": capture["peak_rss_bytes"]} if "peak_rss_bytes" in capture else {},
+        diagnostic=(
+            "sampled RSS for the execution process tree on this allocation node"
+            if procfs else capture.get("diagnostic")
+        ),
+    )
+    io = RuntimeEvidenceGroup(
+        coverage=sampled, source=sampled_source,
+        metrics={key: capture[key] for key in ("read_bytes", "write_bytes") if key in capture},
+        diagnostic=(
+            "sampled process I/O counters; filesystem and remote-node I/O are not implied"
+            if procfs else capture.get("diagnostic")
+        ),
+    )
+    allocation_coverage = "observed" if allocation.resources else "unknown"
+    host_scope = allocation.evidence.get("host_scope", "unknown")
+    if plan.backend != "direct" and host_scope != "allocation":
+        allocation_coverage = "partially_observed" if allocation.resources else "unknown"
+    requested_shape = (
+        plan.resource_shape.to_dict()
+        if plan.resource_shape is not None
+        else {
+            "nodes": plan.requested_resources.nodes,
+            "total_cpus": plan.requested_resources.cpus,
+            "mpi_ranks": plan.requested_resources.mpi_ranks,
+            "gpus": plan.requested_resources.gpus,
+            "memory_bytes": plan.requested_resources.memory_bytes,
+            "walltime_seconds": plan.requested_resources.walltime_seconds,
+        }
+    )
+    discrepancies = _allocation_discrepancies(requested_shape, allocation.resources)
+    allocation_group = RuntimeEvidenceGroup(
+        coverage=allocation_coverage, source="compute_worker_allowlist",
+        metrics={
+            "requested_resource_shape": requested_shape,
+            "compute_worker_observed": allocation.resources,
+            "scheduler_environment_facts": allocation.evidence.get("environment", {}),
+            "hosts": allocation.hosts,
+            "host_scope": host_scope,
+            "discrepancies": discrepancies,
+        },
+        diagnostic=(
+            "scheduler allocation facts visible to this compute worker; not scheduler accounting"
+            if allocation.resources else "no scheduler allocation facts were visible"
+        ),
+    )
+    visible = allocation.evidence.get("environment", {}).get("cuda_visible_devices")
+    allocated_gpus = allocation.resources.get("gpus")
+    nvidia_metrics = (
+        {}
+        if system is None or not system.gpu_available
+        else {
+            "nvidia_devices": system.gpus,
+            "nvidia_driver_version": system.nvidia_driver_version,
+            "cuda_version": system.cuda_version,
+            "cuda_version_source": system.cuda_version_source,
+        }
+    )
+    if visible is not None:
+        gpu = RuntimeEvidenceGroup(
+            coverage="partially_observed",
+            source=(
+                "CUDA_VISIBLE_DEVICES+nvidia_smi"
+                if nvidia_metrics else "CUDA_VISIBLE_DEVICES"
+            ),
+            metrics={
+                "visible_devices": visible, "allocated_gpus": allocated_gpus,
+                **nvidia_metrics,
+            },
+            diagnostic="device identity was observed; utilization counters were not sampled",
+        )
+    elif nvidia_metrics:
+        gpu = RuntimeEvidenceGroup(
+            coverage="partially_observed", source="nvidia_smi",
+            metrics=nvidia_metrics,
+            diagnostic=(
+                "host NVIDIA identity was observed; scheduler allocation and utilization "
+                "were not established"
+            ),
+        )
+    elif allocated_gpus == 0:
+        gpu = RuntimeEvidenceGroup(
+            coverage="unsupported", source="allocation",
+            metrics={"allocated_gpus": 0}, diagnostic="no GPU was allocated",
+        )
+    else:
+        gpu = RuntimeEvidenceGroup(
+            coverage="unavailable", source="runtime_collector",
+            diagnostic="execution-scoped GPU utilization was not available",
+        )
+    environment = RuntimeEvidenceGroup(
+        coverage="observed", source="compute_worker_preflight",
+        metrics={
+            "platform": platform.system() or "unknown",
+            "architecture": platform.machine() or "unknown",
+            "python": platform.python_version(),
+            "working_directory": plan.working_directory,
+            "activation": preflight.get("environment_activation"),
+            "container": preflight.get("container"),
+        },
+    )
+    return RuntimeEvidence(
+        id=new_ulid(), execution_id=execution_id, experiment_id=experiment_id,
+        observed_at=utc_now(), process=process, allocation=allocation_group,
+        cpu=cpu, memory=memory, io=io, gpu=gpu, environment=environment,
+    )
+
+
+def _allocation_discrepancies(
+    requested: dict[str, Any], observed: dict[str, Any]
+) -> list[dict[str, Any]]:
+    mapping = {
+        "nodes": "nodes", "total_cpus": "cpus", "mpi_ranks": "mpi_ranks",
+        "gpus": "gpus", "memory_bytes": "memory_bytes",
+    }
+    result: list[dict[str, Any]] = []
+    for requested_name, observed_name in mapping.items():
+        expected = requested.get(requested_name)
+        actual = observed.get(observed_name)
+        if expected is not None and actual is not None and expected != actual:
+            result.append(
+                {"resource": observed_name, "requested": expected, "observed": actual}
+            )
+    return result
+
+
+def _termination_evidence(
+    experiment: Any,
+    capture: dict[str, Any],
+    verification: Any,
+) -> TerminationEvidence:
+    signal_number = capture.get("termination_signal")
+    launch_error = bool(capture.get("launch_error"))
+    if launch_error:
+        phase, outcome = "launch", "launch_failed"
+    elif signal_number is not None:
+        phase, outcome = "running", "terminated_by_signal"
+    elif experiment.status == "failed":
+        phase, outcome = "running", "running_then_failed"
+    elif verification is not None and verification.aggregate_state == "failed":
+        phase, outcome = "verification", "verification_failed"
+    else:
+        phase, outcome = "running", "completed"
+    return TerminationEvidence(
+        phase=phase, outcome=outcome, source="compute_worker",
+        exit_code=experiment.exit_code, signal=signal_number,
+        result_evidence="complete",
+        telemetry_evidence="observed" if capture.get("collector") == "linux_procfs" else "unavailable",
+    )
+
+
 def _positive_int(value: str) -> int | None:
     try:
         parsed = int(value)
     except ValueError:
         return None
     return parsed if parsed >= 0 else None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_immutable(path: Path, data: bytes) -> None:

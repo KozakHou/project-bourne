@@ -284,9 +284,11 @@ class BackendTests(unittest.TestCase):
                     backend.execute(execution, plan, workload, snapshot)  # type: ignore[arg-type]
             current = store.get_execution(execution.id)
             experiment_id = store.experiment_id(execution.id)
+            retry_safe = store.events(current.id)[-1].details["retry_safe"]
 
-        self.assertEqual(current.state, "failed")
+        self.assertEqual(current.state, "submission_ambiguous")
         self.assertIsNone(experiment_id)
+        self.assertFalse(retry_safe)
 
     def test_slurm_and_pbs_status_parsers_keep_scheduler_state_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -342,6 +344,34 @@ class BackendTests(unittest.TestCase):
             experiment_id = store.experiment_id(execution.id)
 
         self.assertIsNone(experiment_id)
+
+    def test_terminal_scheduler_with_invalid_result_records_partial_bundle(self) -> None:
+        def runner(argv, **_kwargs):
+            values = list(argv)
+            if "--parsable" in values:
+                return command_result(values, stdout="123\n")
+            return command_result(values, stdout="COMPLETED\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, snapshot, workload, plan, execution = self._execution(root, "slurm")
+            backend = SlurmBackend(store, root / "stage", runner=runner)
+            with patch(
+                "bourneprov.backends.shutil.which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ):
+                backend.execute(execution, plan, workload, snapshot)  # type: ignore[arg-type]
+                current = store.get_execution(execution.id)
+                (Path(current.staging_directory) / "result.json").write_text(  # type: ignore[arg-type]
+                    "{}", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(BackendError, "not established"):
+                    backend.wait(current, poll_seconds=0.001)
+            details = store.events(execution.id)[-1].details
+
+        self.assertEqual(details["result_bundle"], "invalid")
+        self.assertEqual(details["result_evidence"], "partial")
+        self.assertEqual(details["termination_outcome"], "result_bundle_partial")
 
     def test_result_experiment_must_match_immutable_plan(self) -> None:
         def runner(argv, **_kwargs):

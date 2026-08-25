@@ -46,6 +46,7 @@ from .constraint_providers import DeclarativeConstraintProvider, ProviderContrac
 from .site_service import SitePlanningService, SitePlanningSession, SiteService
 from .site_models import PolicyApplicability
 from .site_storage import SiteNotFound
+from .planning_models import ContainerExecution
 
 MAX_WAIT_SECONDS = 7 * 24 * 60 * 60
 
@@ -225,6 +226,7 @@ class BourneAgentService:
         variant_approvals: list[str] | None = None,
         explicit_user_declarations: list[str] | None = None,
         trusted_provider_contract: bool = False,
+        container: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session = self._site_sessions.get(request_id)
         if session is None:
@@ -241,6 +243,11 @@ class BourneAgentService:
                     item: True for item in (explicit_user_declarations or [])
                 },
                 trusted_provider_contract=trusted_provider_contract,
+                container=(
+                    None
+                    if container is None
+                    else ContainerExecution.from_dict(container)
+                ),
             )
         except (PermissionError, ProviderContractError, ValueError) as exc:
             self._raise("candidate_selection_failed", "Candidate selection failed.", exc)

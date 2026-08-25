@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import BinaryIO, Mapping, Sequence, TextIO
 
 from .models import ExecutionResult
+from .runtime_collector import ProcessRuntimeCollector
 
 
 def _utc_now() -> str:
@@ -39,9 +40,11 @@ def _write_live(stream: TextIO | None, text: str, lock: threading.Lock) -> None:
 def _pump_stream(
     pipe: BinaryIO,
     destination: TextIO | None,
-    capture: list[str],
+    capture: bytearray,
     encoding: str,
     lock: threading.Lock,
+    maximum_capture_bytes: int | None,
+    truncated: list[bool],
 ) -> None:
     decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
     read = getattr(pipe, "read1", pipe.read)
@@ -51,11 +54,17 @@ def _pump_stream(
             if not chunk:
                 break
             text = decoder.decode(chunk)
-            capture.append(text)
+            remaining = (
+                len(chunk)
+                if maximum_capture_bytes is None
+                else max(0, maximum_capture_bytes - len(capture))
+            )
+            capture.extend(chunk[:remaining])
+            if remaining < len(chunk):
+                truncated[0] = True
             _write_live(destination, text, lock)
         final = decoder.decode(b"", final=True)
         if final:
-            capture.append(final)
             _write_live(destination, final, lock)
     finally:
         pipe.close()
@@ -99,11 +108,15 @@ def execute_command(
     stdout_stream: TextIO | None = None,
     stderr_stream: TextIO | None = None,
     environment: Mapping[str, str] | None = None,
+    collect_runtime: bool = False,
+    capture_limit_bytes: int | None = None,
 ) -> ExecutionResult:
     """Execute *argv*, tee output live when requested, and preserve it."""
 
     if not argv:
         raise ValueError("a command is required")
+    if capture_limit_bytes is not None and capture_limit_bytes < 1:
+        raise ValueError("capture limit must be positive")
 
     started_at = _utc_now()
     started_monotonic = time.monotonic()
@@ -130,6 +143,7 @@ def execute_command(
             exit_code=127,
             stdout="",
             stderr=message,
+            launch_error=True,
         )
     except PermissionError:
         ended_at = _utc_now()
@@ -143,6 +157,7 @@ def execute_command(
             exit_code=126,
             stdout="",
             stderr=message,
+            launch_error=True,
         )
     except OSError as exc:
         ended_at = _utc_now()
@@ -156,23 +171,36 @@ def execute_command(
             exit_code=126,
             stdout="",
             stderr=message,
+            launch_error=True,
         )
 
     if process.stdout is None or process.stderr is None:  # pragma: no cover - Popen contract
         raise RuntimeError("failed to create process output pipes")
 
-    stdout_parts: list[str] = []
-    stderr_parts: list[str] = []
+    collector = ProcessRuntimeCollector(process.pid) if collect_runtime else None
+    if collector is not None:
+        collector.start()
+
+    stdout_bytes = bytearray()
+    stderr_bytes = bytearray()
+    stdout_truncated = [False]
+    stderr_truncated = [False]
     output_lock = threading.Lock()
     readers = [
         threading.Thread(
             target=_pump_stream,
-            args=(process.stdout, stdout_stream, stdout_parts, encoding, output_lock),
+            args=(
+                process.stdout, stdout_stream, stdout_bytes, encoding, output_lock,
+                capture_limit_bytes, stdout_truncated,
+            ),
             name="bourne-stdout",
         ),
         threading.Thread(
             target=_pump_stream,
-            args=(process.stderr, stderr_stream, stderr_parts, encoding, output_lock),
+            args=(
+                process.stderr, stderr_stream, stderr_bytes, encoding, output_lock,
+                capture_limit_bytes, stderr_truncated,
+            ),
             name="bourne-stderr",
         ),
     ]
@@ -189,8 +217,18 @@ def execute_command(
         for reader in readers:
             reader.join()
 
-    stdout = "".join(stdout_parts)
-    stderr = "".join(stderr_parts)
+    stdout = bytes(stdout_bytes).decode(encoding, errors="replace")
+    stderr = bytes(stderr_bytes).decode(encoding, errors="replace")
+    runtime_capture = {} if collector is None else collector.finish()
+    runtime_capture.update(
+        {
+            "stdout_capture_bytes": len(stdout_bytes),
+            "stderr_capture_bytes": len(stderr_bytes),
+            "stdout_truncated": stdout_truncated[0],
+            "stderr_truncated": stderr_truncated[0],
+            "capture_limit_bytes": capture_limit_bytes,
+        }
+    )
 
     ended_at = _utc_now()
     duration = time.monotonic() - started_monotonic
@@ -209,4 +247,12 @@ def execute_command(
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
+        termination_signal=(
+            signal.SIGINT
+            if interrupted
+            else abs(process.returncode)
+            if process.returncode < 0
+            else None
+        ),
+        runtime_capture=runtime_capture,
     )

@@ -329,7 +329,7 @@ class OutcomeIntegrationTests(unittest.TestCase):
                 self.assertEqual(result.experiment.status, "failed")  # type: ignore[union-attr]
                 self.assertEqual(summary is not None, expected)
 
-    def test_scheduled_v2_worker_outcomes_are_imported_transactionally(self) -> None:
+    def test_scheduled_v3_worker_outcomes_are_imported_transactionally(self) -> None:
         def runner(argv, **_kwargs):
             return BoundedCommandResult(tuple(argv), 0, "321\n", "")
 
@@ -366,7 +366,8 @@ class OutcomeIntegrationTests(unittest.TestCase):
             summary = store.telemetry(execution.id)
             verification = store.verification(execution.id)
         self.assertEqual(process.returncode, 0)
-        self.assertEqual(raw_result.protocol_version, 2)
+        self.assertEqual(raw_result.protocol_version, 3)
+        self.assertIsNotNone(raw_result.runtime_evidence)
         self.assertEqual(collected.request_id, req.id)
         self.assertEqual(summary.requested_resources["cpus"], 2)  # type: ignore[union-attr]
         self.assertEqual(summary.allocated_resources["cpus"], 8)  # type: ignore[union-attr]
@@ -410,7 +411,8 @@ class OutcomeIntegrationTests(unittest.TestCase):
             summary = store.telemetry(execution.id)
             verification = store.verification(execution.id)
         self.assertEqual(process.returncode, 0)
-        self.assertEqual(result.protocol_version, 2)
+        self.assertEqual(result.protocol_version, 3)
+        self.assertIsNotNone(result.runtime_evidence)
         self.assertEqual(result.request_id, req.id)
         self.assertEqual(summary.allocated_resources["cpus"], 8)  # type: ignore[union-attr]
         self.assertEqual(verification.aggregate_state, "passed")  # type: ignore[union-attr]

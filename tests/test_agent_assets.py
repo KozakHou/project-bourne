@@ -30,7 +30,7 @@ def skill_frontmatter() -> dict[str, str]:
 class AgentAssetTests(unittest.TestCase):
     def test_python_core_stays_dependency_free_and_mcp_is_optional(self) -> None:
         declared = requires("bourneprov") or []
-        self.assertEqual(version("bourneprov"), "0.7.0")
+        self.assertEqual(version("bourneprov"), "0.8.0")
         self.assertEqual(len(declared), 1)
         self.assertTrue(declared[0].startswith("mcp<3,>=2.0.0;"))
         self.assertIn('extra == "mcp"', declared[0])
@@ -69,14 +69,15 @@ class AgentAssetTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(package["name"], "@project-bourne/mcp")
-        self.assertEqual(package["version"], "0.7.0")
+        self.assertEqual(package["version"], "0.8.0")
         self.assertEqual(package["publishConfig"], {"access": "public"})
         self.assertNotIn("dependencies", package)
         self.assertEqual(package["engines"]["node"], ">=22")
-        self.assertIn('PYTHON_VERSION = "0.7.0"', runtime)
+        self.assertIn('PYTHON_VERSION = "0.8.0"', runtime)
         self.assertIn("shell: false", runtime)
         self.assertNotIn("sbatch", runtime)
         self.assertNotIn("qsub", runtime)
+        self.assertNotIn("bsub", runtime)
 
     def test_registry_and_npm_identity_version_and_transport_are_coupled(self) -> None:
         package = load_json(ROOT / "packages" / "mcp" / "package.json")
@@ -170,6 +171,8 @@ class AgentAssetTests(unittest.TestCase):
                 "hpc",
                 "slurm",
                 "pbs",
+                "lsf",
+                "apptainer",
                 "gpu",
                 "simulation",
                 "numerical-computing",

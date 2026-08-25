@@ -18,6 +18,7 @@ from .planning_models import (
     CandidateSelectionSummary,
     PlanningCandidate,
     ResourceShape,
+    ContainerExecution,
     WorkloadVariant,
 )
 from .remote_transport import OpenSSHTransport, RemoteWorkerClient
@@ -235,6 +236,7 @@ class SitePlanningService:
         variant_approvals: Mapping[str, bool] | None = None,
         explicit_user_declarations: Mapping[str, bool] | None = None,
         trusted_provider_contract: bool = False,
+        container: ContainerExecution | None = None,
     ) -> ExecutionPlan:
         if (
             not isinstance(selection_source, str)
@@ -346,6 +348,7 @@ class SitePlanningService:
             workload_variant_id=None if variant is None else variant.id,
             selection_summary_id=summary.id,
             policy_basis=[item.to_dict() for item in self.sites.policy_claims(site.id)],
+            container=container,
         )
         self.executions.save_plan(plan)
         return plan
@@ -431,10 +434,10 @@ def _scheduler_selection(
     inventory: InventorySnapshot,
     candidate: PlanningCandidate,
 ) -> tuple[str, str, str | None]:
-    families = sorted({item.family for item in inventory.schedulers if item.family in {"slurm", "pbs"}})
-    if requested_backend in {"slurm", "pbs"}:
+    families = sorted({item.family for item in inventory.schedulers if item.family in {"slurm", "pbs", "lsf"}})
+    if requested_backend in {"slurm", "pbs", "lsf"}:
         family = requested_backend
-    elif scheduler_hint in {"slurm", "pbs"}:
+    elif scheduler_hint in {"slurm", "pbs", "lsf"}:
         family = scheduler_hint
     elif len(families) == 1:
         family = families[0]

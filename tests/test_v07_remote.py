@@ -150,7 +150,7 @@ class RemoteTransportContractTests(unittest.TestCase):
             envelope = {
                 "protocol": "bourne.remote-worker", "protocol_version": 1,
                 "operation": "hello", "status": "ok",
-                "data": {"bourne_version": "0.7.0", "compatible": True},
+                "data": {"bourne_version": "0.8.0", "compatible": True},
             }
             return result(list(argv), stdout=json.dumps(envelope))
 
@@ -222,7 +222,7 @@ class RemoteTransportContractTests(unittest.TestCase):
                 "protocol_version": 1,
                 "operation": "hello",
                 "payload": {
-                    "expected_version": "0.7.0",
+                    "expected_version": "0.8.0",
                     "expected_sha256": digest,
                 },
             }

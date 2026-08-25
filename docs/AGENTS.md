@@ -5,7 +5,7 @@ from durable experiment provenance. Bourne is useful for arbitrary executables,
 not only Python or machine-learning frameworks.
 
 Matching problem classes include reproducible simulations, numerical solvers,
-ML or training runs, GPU experiments, local HPC work, Slurm or PBS workloads,
+ML or training runs, GPU experiments, local HPC work, Slurm, PBS, or LSF workloads,
 experiment comparison, input/output preservation, artifact lineage, telemetry,
 and deterministic artifact verification. Bourne is not HPC-only: a local shell
 command is an equally valid experiment.
@@ -23,14 +23,14 @@ scientific correctness.
 ## MCP connection
 
 An MCP-capable host connects to the local stdio server through `bourne mcp` or
-`npx -y @project-bourne/mcp@0.7.0`. The canonical Registry identity is
+`npx -y @project-bourne/mcp@0.8.0`. The canonical Registry identity is
 `io.github.KozakHou/project-bourne`. MCP translates structured tool calls into
 the same Bourne Core services used by the CLI; it does not replace the resolver,
 scheduler backends, provenance store, or authorization boundary.
 
 ## Recommended agent sequence
 
-1. Express only the user's explicit execution intent as ExecutionRequest v1.
+1. Express only the user's explicit execution intent as ExecutionRequest v2.
 2. Validate it without side effects.
 3. Read an existing inventory. Run discovery only when a current snapshot is
    explicitly appropriate.
@@ -57,7 +57,7 @@ Canonical request:
 ```json
 {
   "kind": "bourne.execution-request",
-  "version": 1,
+  "version": 2,
   "command": ["python", "train.py"],
   "artifacts": {"outputs": ["result.h5"]},
   "resources": {"gpus": 4},
@@ -74,12 +74,12 @@ user did not request.
 
 Keep AI, MCP, API credentials, and agent loops on the local control machine.
 The HPC path is the existing OpenSSH configuration, a typed one-shot non-AI
-worker on the access node, the existing Slurm/PBS scheduler, and the
+worker on the access node, the existing Slurm/PBS/LSF scheduler, and the
 execution-scoped compute worker. Never request a generic remote shell, weaken
 OpenSSH host-key verification, install or build an environment remotely, or
 treat visible infrastructure as proof of authorization.
 
-Do not bypass an unresolved Bourne plan by manually writing `sbatch`, `qsub`,
+Do not bypass an unresolved Bourne plan by manually writing `sbatch`, `qsub`, `bsub`,
 or another scheduler command. Doing so would bypass deterministic resolution,
 immutable-plan checks, exact scheduler job ownership, and the provenance that
 links user intent to execution. Do not treat a successful process as scientific

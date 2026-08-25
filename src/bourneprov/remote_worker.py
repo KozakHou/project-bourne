@@ -18,6 +18,17 @@ from .bounded_subprocess import BoundedCommandResult, run_bounded_command
 from .discovery import discover_site
 from .execution_request import ExecutionRequest
 from .inventory_storage import InventoryStore
+from .lsf import (
+    LSF_TERMINAL_STATES,
+    SAFE_LSF_JOB,
+    active_job_arguments,
+    historical_job_arguments,
+    lsf_job_is_unobservable,
+    normalize_lsf_state,
+    parse_bhist_job,
+    parse_bjobs_job,
+    recent_job_arguments,
+)
 from .remote_transport import (
     MAX_REMOTE_REQUEST_BYTES,
     REMOTE_PROTOCOL,
@@ -32,6 +43,7 @@ REMOTE_COMMAND_TIMEOUT = 15.0
 _EXECUTION_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}\Z")
 _SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
 _PBS_JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_LSF_JOB = SAFE_LSF_JOB
 _OPERATIONS = {
     "hello", "discover", "validate_plan", "prepare", "submit",
     "reconcile", "collect", "cancel",
@@ -142,8 +154,8 @@ def _discover(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 def _validate_plan(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     plan, workload, request = _models(payload)
     problems: list[str] = []
-    if plan.backend not in {"slurm", "pbs"}:
-        problems.append("remote v0.7 execution requires Slurm or PBS")
+    if plan.backend not in {"slurm", "pbs", "lsf"}:
+        problems.append("remote execution requires Slurm, PBS, or LSF")
     if plan.argv != workload.argv or plan.working_directory != workload.working_directory:
         problems.append("plan does not match its immutable workload")
     if request is not None and (
@@ -171,8 +183,8 @@ def _prepare(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     execution_id = _execution(payload)
     staging_root = _absolute_path(payload.get("staging_root"), "staging root")
     family = payload.get("scheduler_family")
-    if family not in {"slurm", "pbs"}:
-        raise RemoteWorkerError("remote preparation requires Slurm or PBS")
+    if family not in {"slurm", "pbs", "lsf"}:
+        raise RemoteWorkerError("remote preparation requires Slurm, PBS, or LSF")
     expected = payload.get("expected_files")
     if not isinstance(expected, dict) or set(expected) != {"worker.pyz", "plan.json", "job.sh"}:
         raise RemoteWorkerError("remote preparation requires exact staged-file digests")
@@ -250,7 +262,7 @@ def _submit(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 "diagnostic": "workload variant is absent or changed",
             }
     family = state["scheduler_family"]
-    command = "sbatch" if family == "slurm" else "qsub"
+    command = {"slurm": "sbatch", "pbs": "qsub", "lsf": "bsub"}[family]
     executable = shutil.which(command)
     if executable is None:
         state.update(state="submission_failed", updated_at=utc_now(), diagnostic=f"{command} unavailable")
@@ -258,8 +270,18 @@ def _submit(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return "unavailable", _public_state(state)
     state.update(state="submitting", updated_at=utc_now())
     _write_state(state_path, state)
-    argv = [executable, "--parsable", str(staging / "job.sh")] if family == "slurm" else [executable, str(staging / "job.sh")]
-    result = run_bounded_command(argv, timeout=REMOTE_COMMAND_TIMEOUT)
+    if family == "slurm":
+        argv = [executable, "--parsable", str(staging / "job.sh")]
+        input_bytes = None
+    elif family == "pbs":
+        argv = [executable, str(staging / "job.sh")]
+        input_bytes = None
+    else:
+        argv = [executable]
+        input_bytes = (staging / "job.sh").read_bytes()
+    result = run_bounded_command(
+        argv, timeout=REMOTE_COMMAND_TIMEOUT, input_bytes=input_bytes
+    )
     if result.timed_out:
         state.update(state="ambiguous", updated_at=utc_now(), diagnostic="scheduler submission timed out")
         _write_state(state_path, state)
@@ -295,14 +317,21 @@ def _reconcile(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if result_path.is_file():
         size = result_path.stat().st_size
         if size > MAX_RESULT_RETURN_BYTES:
-            return "unavailable", {**data, "result": None, "diagnostic": "result bundle exceeds remote return bound"}
+            return "unavailable", {
+                **data, "result": None, "result_state": "invalid",
+                "diagnostic": "result bundle exceeds remote return bound",
+            }
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return "failed", {**data, "result": None, "diagnostic": "result bundle is invalid"}
+            return "failed", {
+                **data, "result": None, "result_state": "invalid",
+                "diagnostic": "result bundle is invalid",
+            }
         return "ok", {**data, "result": result, "result_state": "available"}
+    uncertain = observation["state"] in {"unknown", "scheduler_uncertain"}
     return (
-        "unknown" if not observation["observable"] else "ok",
+        "unknown" if not observation["observable"] or uncertain else "ok",
         {**data, "result": None, "result_state": "absent"},
     )
 
@@ -314,7 +343,7 @@ def _cancel(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if job_id is None:
         return "unknown", _public_state(state)
     family = state["scheduler_family"]
-    command = "scancel" if family == "slurm" else "qdel"
+    command = {"slurm": "scancel", "pbs": "qdel", "lsf": "bkill"}[family]
     executable = shutil.which(command)
     if executable is None:
         return "unavailable", {**_public_state(state), "diagnostic": f"{command} unavailable"}
@@ -330,7 +359,7 @@ def _scheduler_observation(state: dict[str, Any]) -> dict[str, Any]:
     family = state["scheduler_family"]
     job_id = state["job_id"]
     identity = state["submitting_identity"]
-    command = "squeue" if family == "slurm" else "qstat"
+    command = {"slurm": "squeue", "pbs": "qstat", "lsf": "bjobs"}[family]
     executable = shutil.which(command)
     if executable is None:
         return {"state": "unobservable", "observable": False, "source": "unavailable"}
@@ -338,8 +367,43 @@ def _scheduler_observation(state: dict[str, Any]) -> dict[str, Any]:
         [executable, "--noheader", "--jobs", job_id, "--user", identity, "--format=%T"]
         if family == "slurm"
         else [executable, "-f", job_id]
+        if family == "pbs"
+        else [executable, *active_job_arguments(job_id, identity)]
     )
     result = run_bounded_command(argv, timeout=REMOTE_COMMAND_TIMEOUT)
+    if family == "lsf":
+        active = _lsf_observation(result, job_id, "active")
+        if active["observable"]:
+            return active
+        if result.timed_out or (
+            result.returncode != 0 and not _lsf_job_is_unobservable(result)
+        ):
+            return active
+        if result.returncode == 0 and result.stdout.strip():
+            return active
+        recent = run_bounded_command(
+            [executable, *recent_job_arguments(job_id, identity)],
+            timeout=REMOTE_COMMAND_TIMEOUT,
+        )
+        recent_observation = _lsf_observation(recent, job_id, "recent_finished")
+        if recent_observation["observable"]:
+            return recent_observation
+        history_executable = shutil.which("bhist")
+        if history_executable is None:
+            return {
+                "state": "unobservable", "observable": False,
+                "terminal": False,
+                "source": "historical_accounting_unavailable",
+                "diagnostic": (
+                    "known job was absent from active and recent-finished LSF "
+                    "views; bhist is unavailable"
+                ),
+            }
+        historical = run_bounded_command(
+            [history_executable, *historical_job_arguments(job_id, identity)],
+            timeout=REMOTE_COMMAND_TIMEOUT,
+        )
+        return _lsf_history_observation(historical, job_id)
     if result.timed_out or result.returncode != 0:
         return {"state": "unobservable", "observable": False, "source": "active", "diagnostic": result.stderr[:4096]}
     if family == "slurm":
@@ -422,6 +486,63 @@ def _public_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _job_id(family: str, stdout: str) -> str | None:
+    if family == "lsf":
+        matches = re.findall(r"\bJob\s+<([0-9]+)>", stdout)
+        return matches[0] if len(matches) == 1 and _LSF_JOB.fullmatch(matches[0]) else None
     value = stdout.strip().split(";", 1)[0] if family == "slurm" else (stdout.strip().split()[0] if stdout.strip() else "")
     pattern = _SLURM_JOB if family == "slurm" else _PBS_JOB
     return value if pattern.fullmatch(value) else None
+
+
+def _lsf_observation(
+    result: BoundedCommandResult, job_id: str, source: str
+) -> dict[str, Any]:
+    if result.timed_out or result.returncode != 0:
+        return {
+            "state": "unobservable", "observable": False, "source": source,
+            "terminal": False,
+            "diagnostic": (result.stderr or "LSF query failed")[:4096],
+        }
+    parsed = parse_bjobs_job(result.stdout, expected_job_id=job_id)
+    if parsed is None:
+        return {
+            "state": "unobservable", "observable": False, "source": source,
+            "terminal": False,
+            "diagnostic": "no unique exact LSF job record",
+        }
+    raw_state = parsed[1]
+    state = normalize_lsf_state(raw_state)
+    return {
+        "state": state, "observable": True, "source": source,
+        "terminal": state in LSF_TERMINAL_STATES,
+        "raw_scheduler_state": raw_state,
+    }
+
+
+def _lsf_history_observation(
+    result: BoundedCommandResult, job_id: str
+) -> dict[str, Any]:
+    source = "historical_accounting"
+    if result.timed_out or result.returncode != 0:
+        return {
+            "state": "unobservable", "observable": False, "terminal": False,
+            "source": source,
+            "diagnostic": (result.stderr or "exact-job bhist query failed")[:4096],
+        }
+    parsed = parse_bhist_job(result.stdout, expected_job_id=job_id)
+    if parsed is None:
+        return {
+            "state": "unobservable", "observable": False, "terminal": False,
+            "source": source,
+            "diagnostic": "bhist output did not contain one unique exact job record",
+        }
+    raw_state = parsed[1]
+    state = normalize_lsf_state(raw_state)
+    return {
+        "state": state, "observable": True, "terminal": state in LSF_TERMINAL_STATES,
+        "source": source, "raw_scheduler_state": raw_state,
+    }
+
+
+def _lsf_job_is_unobservable(result: BoundedCommandResult) -> bool:
+    return lsf_job_is_unobservable(result)

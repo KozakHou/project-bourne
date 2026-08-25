@@ -15,6 +15,7 @@ from .backends import (
     render_batch_script,
 )
 from .inventory_models import InventorySnapshot
+from .lsf import LSF_TERMINAL_STATES
 from .planning_models import ResourceShape
 from .remote_transport import RemoteTransportError, RemoteWorkerClient
 from .site_models import Site
@@ -58,8 +59,8 @@ class RemoteSchedulerBackend:
     ) -> Submission:
         if plan.site_id != self.site.id:
             raise BackendError("remote plan site does not match the selected transport")
-        if plan.backend not in {"slurm", "pbs"}:
-            raise BackendError("v0.7 remote execution requires Slurm or PBS")
+        if plan.backend not in {"slurm", "pbs", "lsf"}:
+            raise BackendError("remote execution requires Slurm, PBS, or LSF")
         if self.site.remote_project_root is None:
             raise BackendError("remote site has no configured project/staging root")
         request = self.store.request_for_workload(workload.id)
@@ -235,16 +236,41 @@ class RemoteSchedulerBackend:
                 evidence = {} if remote is None else remote.get("evidence", {})
                 scheduler = evidence.get("scheduler", {})
                 state = scheduler.get("state") if isinstance(scheduler, dict) else None
-                if state in {
+                terminal_states = {
                     "completed", "failed", "cancelled", "finished", "timeout",
                     "node_fail", "out_of_memory", "preempted",
-                }:
+                }
+                if execution.backend == "lsf":
+                    terminal_states = set(LSF_TERMINAL_STATES)
+                if state in terminal_states:
+                    result_evidence = (
+                        "partial"
+                        if evidence.get("result_state") == "invalid"
+                        else "missing"
+                    )
+                    outcome = {
+                        "cancelled": "scheduler_cancelled",
+                        "timeout": "scheduler_timeout",
+                        "node_fail": "node_failure",
+                        "out_of_memory": "out_of_memory",
+                    }.get(
+                        state,
+                        "result_bundle_partial"
+                        if result_evidence == "partial"
+                        else "result_bundle_missing",
+                    )
                     self.store.update_execution_state(
                         execution.id, "collection_failed", utc_now(),
                         {
                             "scientific_completion_established": False,
                             "scheduler_state": state,
-                            "result_bundle": "absent_or_invalid",
+                            "result_bundle": (
+                                "invalid" if result_evidence == "partial" else "absent"
+                            ),
+                            "termination_phase": "scheduler",
+                            "termination_outcome": outcome,
+                            "result_evidence": result_evidence,
+                            "telemetry_evidence": "unavailable",
                         },
                         error=str(exc),
                     )
@@ -360,7 +386,9 @@ class RemoteSchedulerBackend:
                     execution.id,
                     (
                         "scheduler_unobservable"
-                        if scheduler_state in {"unobservable", "unknown"}
+                        if scheduler_state in {
+                            "unobservable", "unknown", "scheduler_uncertain"
+                        }
                         else "queued"
                         if scheduler_state in {"pending", "queued", "configuring"}
                         else "running"

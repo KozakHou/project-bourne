@@ -1,4 +1,4 @@
-"""Framework-independent direct, Slurm, and PBS execution backends."""
+"""Framework-independent direct, Slurm, PBS, and LSF execution backends."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 import shlex
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Protocol, TextIO
 
@@ -22,6 +22,17 @@ from .execution_outcomes import (
 from .execution_request import ExecutionRequest
 from .identity import current_process_identity
 from .inventory_models import InventorySnapshot
+from .lsf import (
+    LSF_TERMINAL_STATES,
+    SAFE_LSF_JOB,
+    active_job_arguments,
+    historical_job_arguments,
+    lsf_job_is_unobservable,
+    normalize_lsf_state,
+    parse_bhist_job,
+    parse_bjobs_job,
+    recent_job_arguments,
+)
 from .planning_models import ResourceShape
 from .worker_bundle import build_worker_zipapp, write_staged_plan
 from .worker_result import WorkerResult, WorkerResultError, load_worker_result
@@ -36,12 +47,17 @@ MAX_SCHEDULER_POLL_SECONDS = 60.0
 _SAFE_SCHEDULER_NAME = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 _SAFE_SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
 _SAFE_PBS_JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_SAFE_LSF_JOB = SAFE_LSF_JOB
 
 CommandRunner = Callable[..., BoundedCommandResult]
 
 
 class BackendError(RuntimeError):
     pass
+
+
+class AmbiguousSubmission(BackendError):
+    """The scheduler may have accepted a job but did not return one exact ID."""
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,7 @@ class SchedulerObservation:
     observable: bool
     terminal: bool
     diagnostic: str | None = None
+    raw_state: str | None = None
 
     def details(self, family: str, job_id: str) -> dict[str, object]:
         value: dict[str, object] = {
@@ -72,6 +89,8 @@ class SchedulerObservation:
         }
         if self.diagnostic is not None:
             value["diagnostic"] = self.diagnostic
+        if self.raw_state is not None:
+            value["raw_scheduler_state"] = self.raw_state
         return value
 
 
@@ -166,7 +185,8 @@ class SchedulerBackend:
             self.name, plan, worker_path, plan_path, result_path,
             execution.id, target_name=target_name,
         )
-        script_path = staging / ("job.slurm" if self.name == "slurm" else "job.pbs")
+        suffix = {"slurm": "job.slurm", "pbs": "job.pbs", "lsf": "job.lsf"}[self.name]
+        script_path = staging / suffix
         script_path.write_text(script, encoding="utf-8")
         self.store.set_staging_directory(execution.id, str(staging), utc_now())
         self.store.update_execution_state(
@@ -178,9 +198,25 @@ class SchedulerBackend:
         )
         executable = shutil.which(self.submit_command)
         if executable is None:
-            raise BackendError(f"{self.submit_command} executable is unavailable")
-        result = self._run([executable, *self._submit_arguments(script_path)])
-        if result.returncode != 0 or result.timed_out:
+            detail = f"{self.submit_command} executable is unavailable"
+            self.store.update_execution_state(
+                execution.id, "failed", utc_now(),
+                {"phase": "submission", "diagnostic": detail}, error=detail,
+            )
+            raise BackendError(detail)
+        result = self._run(
+            [executable, *self._submit_arguments(script_path)],
+            input_bytes=self._submission_input(script_path),
+        )
+        if result.timed_out:
+            detail = "scheduler submission timed out; acceptance is unknown"
+            self.store.update_execution_state(
+                execution.id, "submission_ambiguous", utc_now(),
+                {"phase": "submission", "diagnostic": detail, "retry_safe": False},
+                error=detail,
+            )
+            raise AmbiguousSubmission(detail)
+        if result.returncode != 0:
             detail = _failure_detail(result)
             self.store.update_execution_state(
                 execution.id, "failed", utc_now(),
@@ -189,6 +225,16 @@ class SchedulerBackend:
             raise BackendError(f"{self.name} submission failed: {detail}")
         try:
             job_id = self._parse_submission(result.stdout)
+        except AmbiguousSubmission as exc:
+            self.store.update_execution_state(
+                execution.id, "submission_ambiguous", utc_now(),
+                {
+                    "phase": "submission", "diagnostic": str(exc),
+                    "retry_safe": False,
+                },
+                error=str(exc),
+            )
+            raise
         except BackendError as exc:
             self.store.update_execution_state(
                 execution.id, "failed", utc_now(),
@@ -294,17 +340,37 @@ class SchedulerBackend:
                 pass
             job = self._known_job(current)
             observation = self._observe_and_record(current, job)
-            if observation.terminal or not observation.observable:
+            if observation.terminal or (
+                not observation.observable and self.name != "lsf"
+            ):
                 try:
                     return self.collect(self.store.get_execution(execution.id))
                 except BackendError as exc:
                     now = utc_now()
+                    result_path = (
+                        None
+                        if current.staging_directory is None
+                        else Path(current.staging_directory) / "result.json"
+                    )
+                    result_evidence = (
+                        "partial"
+                        if result_path is not None and result_path.is_file()
+                        else "missing"
+                    )
                     details = observation.details(self.name, job.job_id)
                     details.update(
                         {
-                            "result_bundle": "absent_or_invalid",
+                            "result_bundle": (
+                                "invalid" if result_evidence == "partial" else "absent"
+                            ),
                             "scientific_completion_established": False,
                             "collection_diagnostic": str(exc)[:4096],
+                            "termination_phase": "scheduler",
+                            "termination_outcome": _scheduler_outcome(
+                                observation.state, result_evidence=result_evidence
+                            ),
+                            "result_evidence": result_evidence,
+                            "telemetry_evidence": "unavailable",
                         }
                     )
                     self.store.update_execution_state(
@@ -357,19 +423,29 @@ class SchedulerBackend:
         self.store.update_scheduler_job(execution.id, "cancelled", now)
         self.store.update_execution_state(
             execution.id, "cancelled", now,
-            {"scheduler_family": self.name, "job_id": job.job_id},
+            {
+                "scheduler_family": self.name, "job_id": job.job_id,
+                "termination_phase": "scheduler",
+                "termination_outcome": "scheduler_cancelled",
+                "result_evidence": "unknown", "telemetry_evidence": "unknown",
+            },
         )
 
     @property
     def terminal_states(self) -> set[str]:
         raise NotImplementedError
 
-    def _run(self, argv: list[str]) -> BoundedCommandResult:
+    def _run(
+        self, argv: list[str], *, input_bytes: bytes | None = None
+    ) -> BoundedCommandResult:
         try:
-            return self.runner(
-                argv, timeout=SCHEDULER_TIMEOUT_SECONDS,
-                max_output_bytes=MAX_SCHEDULER_OUTPUT_BYTES,
-            )
+            keywords = {
+                "timeout": SCHEDULER_TIMEOUT_SECONDS,
+                "max_output_bytes": MAX_SCHEDULER_OUTPUT_BYTES,
+            }
+            if input_bytes is not None:
+                keywords["input_bytes"] = input_bytes
+            return self.runner(argv, **keywords)
         except OSError as exc:
             raise BackendError(f"could not run scheduler command: {exc}") from exc
 
@@ -385,6 +461,10 @@ class SchedulerBackend:
 
     def _submit_arguments(self, script_path: Path) -> list[str]:
         raise NotImplementedError
+
+    def _submission_input(self, script_path: Path) -> bytes | None:
+        del script_path
+        return None
 
     def _parse_submission(self, stdout: str) -> str:
         raise NotImplementedError
@@ -590,6 +670,129 @@ class PBSBackend(SchedulerBackend):
         return [job_id]
 
 
+class LSFBackend(SchedulerBackend):
+    name = "lsf"
+    submit_command = "bsub"
+    status_command = "bjobs"
+    cancel_command = "bkill"
+
+    @property
+    def terminal_states(self) -> set[str]:
+        return set(LSF_TERMINAL_STATES)
+
+    def _submit_arguments(self, script_path: Path) -> list[str]:
+        del script_path
+        return []
+
+    def _submission_input(self, script_path: Path) -> bytes | None:
+        return script_path.read_bytes()
+
+    def _parse_submission(self, stdout: str) -> str:
+        matches = re.findall(r"\bJob\s+<([0-9]+)>", stdout)
+        if len(matches) != 1 or not _SAFE_LSF_JOB.fullmatch(matches[0]):
+            raise AmbiguousSubmission("LSF returned no unique exact job identity")
+        return matches[0]
+
+    def _status_arguments(self, job_id: str, identity: str) -> list[str]:
+        return active_job_arguments(job_id, identity)
+
+    def _parse_status(self, result: BoundedCommandResult) -> str:
+        if result.returncode != 0 or result.timed_out:
+            raise BackendError(f"LSF status failed: {_failure_detail(result)}")
+        parsed = _parse_lsf_job_line(result.stdout)
+        if parsed is None:
+            return "unobservable"
+        _job_id, raw_state = parsed
+        return _normalize_lsf_state(raw_state)
+
+    def _observe_job(
+        self, job: SchedulerJob, status_executable: str
+    ) -> SchedulerObservation:
+        active = self._run(
+            [status_executable, *self._status_arguments(job.job_id, job.submitting_identity)]
+        )
+        parsed = None if active.returncode != 0 or active.timed_out else _parse_lsf_job_line(
+            active.stdout, expected_job_id=job.job_id
+        )
+        if parsed is not None:
+            raw_state = parsed[1]
+            state = _normalize_lsf_state(raw_state)
+            return SchedulerObservation(
+                state=state, source="active", observable=True,
+                terminal=state in self.terminal_states,
+                raw_state=raw_state,
+            )
+        if active.timed_out:
+            raise BackendError(f"LSF active status timed out: {_failure_detail(active)}")
+        if active.returncode != 0 and not _lsf_job_is_unobservable(active):
+            raise BackendError(f"LSF active status failed: {_failure_detail(active)}")
+        if active.returncode == 0 and active.stdout.strip():
+            raise BackendError(
+                "LSF active status did not contain one unique exact job record"
+            )
+        recent = self._run(
+            [status_executable, *recent_job_arguments(
+                job.job_id, job.submitting_identity
+            )]
+        )
+        recent_parsed = (
+            None
+            if recent.returncode != 0 or recent.timed_out
+            else _parse_lsf_job_line(recent.stdout, expected_job_id=job.job_id)
+        )
+        if recent_parsed is not None:
+            raw_state = recent_parsed[1]
+            state = _normalize_lsf_state(raw_state)
+            return SchedulerObservation(
+                state=state, source="recent_finished", observable=True,
+                terminal=state in self.terminal_states, raw_state=raw_state,
+            )
+
+        history_executable = shutil.which("bhist")
+        if history_executable is None:
+            return SchedulerObservation(
+                state="unobservable", source="historical_accounting_unavailable",
+                observable=False, terminal=False,
+                diagnostic=(
+                    "known job was absent from active and recent-finished LSF "
+                    "views; bhist is unavailable"
+                ),
+            )
+        historical = self._run(
+            [history_executable, *historical_job_arguments(
+                job.job_id, job.submitting_identity
+            )]
+        )
+        historical_parsed = (
+            None
+            if historical.returncode != 0 or historical.timed_out
+            else parse_bhist_job(historical.stdout, expected_job_id=job.job_id)
+        )
+        if historical_parsed is None:
+            if historical.timed_out:
+                diagnostic = "exact-job bhist query timed out"
+            elif historical.returncode != 0:
+                diagnostic = "exact-job bhist query failed: " + _failure_detail(historical)
+            elif historical.stdout.strip():
+                diagnostic = "bhist output did not contain one unique exact job record"
+            else:
+                diagnostic = "known job was absent from active, recent, and historical LSF views"
+            return SchedulerObservation(
+                state="unobservable", source="historical_accounting",
+                observable=False, terminal=False, diagnostic=diagnostic[:4096],
+            )
+        raw_state = historical_parsed[1]
+        state = _normalize_lsf_state(raw_state)
+        return SchedulerObservation(
+            state=state, source="historical_accounting", observable=True,
+            terminal=state in self.terminal_states, raw_state=raw_state,
+        )
+
+    def _cancel_arguments(self, job_id: str, identity: str) -> list[str]:
+        del identity
+        return [job_id]
+
+
 def render_batch_script(
     family: str,
     plan: ExecutionPlan,
@@ -602,11 +805,17 @@ def render_batch_script(
 ) -> str:
     """Render fixed scheduler syntax; scientific argv is never shell text."""
 
-    if family not in {"slurm", "pbs"}:
+    if family not in {"slurm", "pbs", "lsf"}:
         raise ValueError("unsupported scheduler family")
     if target_name is not None and not _SAFE_SCHEDULER_NAME.fullmatch(target_name):
         raise ValueError("scheduler target name contains unsafe characters")
-    directives = _slurm_directives(plan, target_name) if family == "slurm" else _pbs_directives(plan, target_name)
+    directives = (
+        _slurm_directives(plan, target_name)
+        if family == "slurm"
+        else _pbs_directives(plan, target_name)
+        if family == "pbs"
+        else _lsf_directives(plan, target_name)
+    )
     command = " ".join(
         shlex.quote(str(item))
         for item in (worker_path, plan_path, result_path, execution_id)
@@ -725,6 +934,54 @@ def _pbs_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]:
     return values
 
 
+def _lsf_directives(plan: ExecutionPlan, target_name: str | None) -> list[str]:
+    values = ["#BSUB -J bourne"]
+    if target_name:
+        values.append(f"#BSUB -q {target_name}")
+    shape = plan.resource_shape
+    resources = plan.requested_resources
+    nodes = shape.nodes if shape is not None else resources.nodes
+    ranks = shape.mpi_ranks if shape is not None else resources.mpi_ranks
+    cpus = shape.total_cpus if shape is not None else resources.cpus
+    gpus = shape.gpus if shape is not None else resources.gpus
+    memory = shape.memory_bytes if shape is not None else resources.memory_bytes
+    walltime = shape.walltime_seconds if shape is not None else resources.walltime_seconds
+    slots = ranks or cpus
+    if slots is not None:
+        values.append(f"#BSUB -n {slots}")
+    per_host = None
+    if shape is not None:
+        per_host = (
+            shape.ranks_per_node if ranks is not None else shape.cpus_per_node
+        )
+    if nodes is not None:
+        if slots is None:
+            raise ValueError(
+                "LSF node count requires total CPUs or MPI ranks for a portable mapping"
+            )
+        if per_host is not None and slots == nodes * per_host:
+            values.append(f'#BSUB -R "span[ptile={per_host}]"')
+        elif nodes == 1:
+            values.append('#BSUB -R "span[hosts=1]"')
+        else:
+            raise ValueError(
+                "LSF multi-node shape requires a divisible per-host CPU or MPI layout"
+            )
+    elif per_host is not None:
+        values.append(f'#BSUB -R "span[ptile={per_host}]"')
+    if gpus not in {None, 0}:
+        raise ValueError(
+            "LSF GPU mapping is unresolved; Bourne will not invent site-specific -gpu semantics"
+        )
+    if memory is not None:
+        raise ValueError(
+            "LSF memory mapping is unresolved; Bourne will not invent site-specific -M units"
+        )
+    if walltime is not None:
+        values.append(f"#BSUB -W {max(1, (walltime + 59) // 60)}")
+    return values
+
+
 def _shape_threads_per_rank(shape: ResourceShape) -> int | None:
     if shape.threads_per_rank is not None:
         return shape.threads_per_rank
@@ -773,6 +1030,24 @@ def _import_result(store: ExecutionStore, result: WorkerResult) -> None:
         raise BackendError("released v0.4 worker results cannot carry v0.5 outcomes")
     telemetry = result.telemetry
     scheduler_job = store.get_scheduler_job(result.execution_id)
+    runtime_evidence = result.runtime_evidence
+    if runtime_evidence is not None and scheduler_job is not None:
+        runtime_evidence = replace(
+            runtime_evidence,
+            allocation=replace(
+                runtime_evidence.allocation,
+                metrics={
+                    **runtime_evidence.allocation.metrics,
+                    "controller_scheduler_job": {
+                        "family": scheduler_job.family,
+                        "job_id": scheduler_job.job_id,
+                        "submitting_identity": scheduler_job.submitting_identity,
+                        "submitted_at": scheduler_job.submitted_at,
+                        "last_observed_state": scheduler_job.state,
+                    },
+                },
+            ),
+        )
     if (
         telemetry is not None
         and scheduler_job is not None
@@ -787,6 +1062,8 @@ def _import_result(store: ExecutionStore, result: WorkerResult) -> None:
         store.import_worker_failure(
             result.execution_id, result.allocation, state=result.state,
             occurred_at=result.created_at, details=details, error=result.error,
+            runtime_evidence=runtime_evidence,
+            termination=result.termination,
         )
     else:
         store.import_experiment_result(
@@ -795,6 +1072,8 @@ def _import_result(store: ExecutionStore, result: WorkerResult) -> None:
             occurred_at=result.created_at, details=details,
             telemetry=telemetry,
             verification=result.verification,
+            runtime_evidence=runtime_evidence,
+            termination=result.termination,
         )
 
 
@@ -804,12 +1083,29 @@ def _validate_result_against_plan(
     experiment = result.experiment
     if experiment is None:
         return
+    expected_argv = _planned_execution_argv(plan)
     if (
-        experiment.command != plan.executable
-        or experiment.arguments != plan.arguments
+        experiment.command != expected_argv[0]
+        or experiment.arguments != expected_argv[1:]
         or experiment.working_directory != plan.working_directory
     ):
         raise BackendError("worker experiment does not match the immutable plan")
+
+
+def _planned_execution_argv(plan: ExecutionPlan) -> list[str]:
+    if plan.container is None:
+        return plan.argv
+    container = plan.container
+    argv = [container.runtime, "exec"]
+    if container.clean_environment:
+        argv.append("--cleanenv")
+    argv.extend(["--pwd", plan.working_directory])
+    for mount in container.mounts:
+        specification = f"{mount.source}:{mount.destination}"
+        if mount.read_only:
+            specification += ":ro"
+        argv.extend(["--bind", specification])
+    return [*argv, container.image, *plan.argv]
 
 
 def _validate_request_outcomes(
@@ -873,7 +1169,9 @@ def _telemetry_semantics(value: ExecutionTelemetrySummary | None) -> object:
 
 
 def _execution_state(observation: SchedulerObservation) -> str:
-    if not observation.observable:
+    if not observation.observable or observation.state in {
+        "unknown", "scheduler_uncertain"
+    }:
         return "scheduler_unobservable"
     if observation.terminal:
         return "scheduler_terminal"
@@ -881,6 +1179,22 @@ def _execution_state(observation: SchedulerObservation) -> str:
         "pending": "queued", "queued": "queued", "configuring": "queued",
         "running": "running", "completing": "running", "cancelled": "cancelled",
     }.get(observation.state, "submitted")
+
+
+def _scheduler_outcome(state: str, *, result_evidence: str = "missing") -> str:
+    scheduler = {
+        "cancelled": "scheduler_cancelled",
+        "timeout": "scheduler_timeout",
+        "out_of_memory": "out_of_memory",
+        "node_fail": "node_failure",
+    }.get(state)
+    if scheduler is not None:
+        return scheduler
+    return (
+        "result_bundle_partial"
+        if result_evidence == "partial"
+        else "result_bundle_missing"
+    )
 
 
 def _failure_detail(result: BoundedCommandResult) -> str:
@@ -902,6 +1216,21 @@ def _parse_slurm_accounting_state(stdout: str, job_id: str) -> str | None:
     return None
 
 
+def _parse_lsf_job_line(
+    stdout: str, expected_job_id: str | None = None
+) -> tuple[str, str] | None:
+    if expected_job_id is None:
+        rows = [line.split() for line in stdout.splitlines() if line.strip()]
+        if len(rows) != 1 or len(rows[0]) != 2:
+            return None
+        expected_job_id = rows[0][0]
+    return parse_bjobs_job(stdout, expected_job_id=expected_job_id)
+
+
+def _normalize_lsf_state(value: str) -> str:
+    return normalize_lsf_state(value)
+
+
 def _pbs_job_is_unobservable(result: BoundedCommandResult) -> bool:
     diagnostic = f"{result.stderr}\n{result.stdout}".casefold()
     return bool(
@@ -910,6 +1239,10 @@ def _pbs_job_is_unobservable(result: BoundedCommandResult) -> bool:
             diagnostic,
         )
     )
+
+
+def _lsf_job_is_unobservable(result: BoundedCommandResult) -> bool:
+    return lsf_job_is_unobservable(result)
 
 
 def _walltime(seconds: int) -> str:

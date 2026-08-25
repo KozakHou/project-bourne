@@ -17,7 +17,7 @@ except ImportError:  # Core-only installations intentionally omit the optional S
     Client = None  # type: ignore[assignment]
 
 from bourneprov.agent_interface import BourneAgentService
-from bourneprov.backends import PBSBackend, SlurmBackend
+from bourneprov.backends import LSFBackend, PBSBackend, SlurmBackend
 from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.inventory_storage import InventoryStore
 from bourneprov.execution_request import execution_request_schema
@@ -53,7 +53,7 @@ TOOLS = [
 def execution_request(command: list[str], **values: object) -> dict[str, object]:
     return {
         "kind": "bourne.execution-request",
-        "version": 1,
+        "version": 2,
         "command": command,
         **values,
     }
@@ -76,7 +76,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         request_schema = by_name["bourne_plan"].input_schema["properties"]["request"]
         self.assertFalse(request_schema["additionalProperties"])
         self.assertEqual(request_schema["properties"]["kind"]["const"], "bourne.execution-request")
-        self.assertEqual(request_schema["properties"]["version"]["const"], 1)
+        self.assertEqual(request_schema["properties"]["version"]["const"], 2)
         self.assertEqual(request_schema["properties"]["command"]["maxItems"], 4096)
         for tool in listed.tools:
             self.assertTrue(tool.description)
@@ -240,6 +240,8 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             case = root / "case.json"
             original = b'{"decomposition":{"x":1,"y":1},"science":42}\n'
             case.write_bytes(original)
+            image = root / "science.sif"
+            image.write_bytes(b"existing-image")
             document = execution_request(
                 [sys.executable, "case.json"],
                 artifacts={"inputs": ["case.json"]},
@@ -299,6 +301,17 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                         "selection_source": "test-human",
                         "rationale": "focused MCP contract test",
                         "trusted_provider_contract": True,
+                        "container": {
+                            "runtime": "apptainer",
+                            "image": str(image),
+                            "mounts": [
+                                {
+                                    "source": str(root),
+                                    "destination": "/project",
+                                    "read_only": True,
+                                }
+                            ],
+                        },
                     },
                 )
                 unknown = await client.call_tool(
@@ -326,6 +339,10 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             "candidate_selection_failed",
         )
         self.assertEqual(selected.structured_content["data"]["plan"]["site_id"], site.id)
+        self.assertEqual(
+            selected.structured_content["data"]["plan"]["container"]["runtime"],
+            "apptainer",
+        )
         self.assertIsNotNone(
             selected.structured_content["data"]["plan"]["workload_variant_id"]
         )
@@ -377,10 +394,14 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(executed.structured_content["ok"])
         self.assertIn("not-an-mcp-frame", stderr)
 
-    async def test_slurm_and_pbs_lifecycle_stays_scoped_to_bourne_executions(self) -> None:
+    async def test_slurm_pbs_and_lsf_lifecycle_stays_scoped_to_bourne_executions(self) -> None:
         for family, backend_type, job_ids, allocation in (
             ("slurm", SlurmBackend, ("321", "322"), {"SLURM_CPUS_ON_NODE": "8"}),
             ("pbs", PBSBackend, ("88.server", "89.server"), {"PBS_NP": "8"}),
+            (
+                "lsf", LSFBackend, ("4182", "4183"),
+                {"LSB_DJOB_NUMPROC": "8", "LSB_MCPU_HOSTS": "n01 8"},
+            ),
         ):
             with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -392,9 +413,14 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
                 def runner(argv, **_kwargs):
                     calls.append(tuple(argv))
-                    if Path(argv[0]).name in {"sbatch", "qsub"}:
+                    if Path(argv[0]).name in {"sbatch", "qsub", "bsub"}:
+                        job_id = next(submitted_jobs)
                         return BoundedCommandResult(
-                            tuple(argv), 0, f"{next(submitted_jobs)}\n", ""
+                            tuple(argv), 0,
+                            (
+                                f"Job <{job_id}> is submitted to queue <normal>.\n"
+                                if family == "lsf" else f"{job_id}\n"
+                            ), ""
                         )
                     return BoundedCommandResult(tuple(argv), 0, "", "")
 
@@ -478,7 +504,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(foreign.structured_content["error"]["code"], "unknown_execution")
                 self.assertEqual(cancelled.structured_content["data"]["state"], "cancelled")
-                cancel_command = "scancel" if family == "slurm" else "qdel"
+                cancel_command = {
+                    "slurm": "scancel", "pbs": "qdel", "lsf": "bkill"
+                }[family]
                 cancellation_calls = [
                     call for call in calls if Path(call[0]).name == cancel_command
                 ]

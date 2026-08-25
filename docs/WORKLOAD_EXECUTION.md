@@ -6,6 +6,9 @@ v0.7 extends that foundation with durable sites, resource shapes, bounded
 constraint candidates, explicit selection, existing-environment activation,
 and typed remote scheduler execution. The full extension is documented in
 [Site-aware planning](SITE_AWARE_PLANNING.md).
+v0.8 adds IBM LSF, versioned runtime/termination evidence, and narrow
+existing-image Apptainer/Singularity execution. See
+[Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md).
 
 ## Durable model
 
@@ -48,7 +51,7 @@ stays unresolved; Bourne does not guess among `mpirun`, `mpiexec`, and `srun`.
 
 ## Resolver
 
-The resolver evaluates direct, Slurm, and PBS candidates using one persisted
+The resolver evaluates direct, Slurm, PBS, and LSF candidates using one persisted
 inventory. Explicit backend, target, and context constraints are applied first.
 Known hard incompatibilities are rejected. A fully supported direct candidate
 is preferred. One remaining scheduler candidate may be selected with its
@@ -91,6 +94,17 @@ the backend. A recognized exact-job "unknown job" response is recorded as
 unobservable. Without a result bundle it also ends as `collection_failed`;
 other status-command failures remain explicit query errors.
 
+`LSFBackend` submits the Bourne-owned script to `bsub` on stdin, captures one
+exact numeric job ID, queries only that job and submitting identity with
+selectable `bjobs` fields, and cancels only that recorded job with `bkill`.
+Active `bjobs`, recent-finished `bjobs -a`, and durable historical `bhist -n 0`
+observations have distinct evidence sources. `UNKWN` and `ZOMBI` preserve
+scheduler uncertainty; `POST_DONE` and `POST_ERR` preserve distinct
+post-processing outcomes. Disappearance from the active and recent views alone
+never establishes completion. A
+timed-out submission or an accepted-looking response without one exact job ID
+is `submission_ambiguous` and is not blindly retried.
+
 All controller scheduler calls use explicit argv, `shell=False`, bounded
 stdout/stderr, and timeouts. Bourne never queries all users' jobs, modifies
 cluster configuration/reservations/QoS, escalates privileges, bypasses the
@@ -117,20 +131,26 @@ selects an available Python 3 interpreter and invokes that worker. Scientific
 argv is stored only as a JSON list and is ultimately passed to `Popen` as argv;
 it is never flattened into scheduler shell syntax.
 
-Inside the allocation the worker observes an allowlist of Slurm/PBS allocation
+Inside the allocation the worker observes an allowlist of Slurm/PBS/LSF allocation
 variables and the actual hostname, validates the working directory, resolves
 the executable, and compares hard resource requests where allocation facts are
 available. A known shortfall produces `preflight_failed` and the scientific
 program is not launched.
 
 Successful or failed execution produces a bounded, versioned JSON result with
-the experiment, artifacts, lineage, allocation, and preflight evidence. The
+the experiment, artifacts, lineage, allocation, preflight, runtime, and
+termination evidence. Runtime groups cover process, allocation, CPU, memory,
+I/O, GPU, and environment facts with an explicit coverage state. The
 controller validates IDs, types, relationships, size, nesting, and collection
 counts before one transactional SQLite import. Bourne never deserializes pickle
 or executable code.
 
 Scheduler `COMPLETED` without a valid result is `collection_failed`; it does not
 create or claim a completed experiment.
+
+The remote-worker protocol remains v1. Worker-result v3 adds runtime and
+termination evidence while preserving v1/v2 readers. Staged-plan v4 represents
+optional existing-image execution while preserving v1/v2/v3 readers.
 
 ## CLI
 
@@ -161,20 +181,27 @@ future SDK/MCP boundary.
 - The scientific working directory and explicitly declared paths are not
   copied wholesale. A declared safe workload variant is staged separately, but
   arbitrary project/data synchronization is not implemented.
-- v0.7 supports typed activation of already-existing modules, Conda
-  environments, and virtual environments. It does not install dependencies,
-  build environments, inject launchers, orchestrate containers, or infer site
-  policy.
+- v0.8 supports typed activation of already-existing modules, Conda,
+  virtualenv, and Spack environments. It does not install dependencies, build
+  environments, inject launchers, or infer site policy. Its container support
+  executes an already-existing Apptainer/Singularity image only; it does not
+  build, pull, convert, install, or manage images. It also does not orchestrate
+  multi-node container launch, choose MPI-launcher/container ordering, or
+  inject an MPI launcher.
 - Remote SSH execution is scheduler-mediated only. There is no disconnect-safe
   direct remote execution, arbitrary remote shell, blind submission retry, or
   generic remote file browser.
-- Scheduler state parsing targets common Slurm/PBS interfaces and needs
+- Scheduler state parsing targets common Slurm/PBS/LSF interfaces and needs
   additional real-site validation across vendor variants.
 - Slurm accounting is optional and may be unavailable or delayed by site
   configuration. Bourne records that uncertainty instead of inventing a
   terminal scheduler outcome.
-- Output capture still accumulates stdout and stderr in memory before result
-  serialization; large-log spooling remains future work.
+- Compute-worker stdout/stderr capture is bounded to 8 MiB per stream and
+  truncation is recorded while live output continues. Disk-spooled full logs
+  remain future work.
+- Linux runtime sampling covers only the execution process tree visible to one
+  Compute Worker. It is not whole-allocation multi-node telemetry. Other
+  platforms and unavailable metrics retain explicit coverage states.
 - The Bourne control plane is supported and tested on Linux and macOS. Native
   Windows is not yet validated or supported, including scheduler execution and
   native Windows process-tree supervision.

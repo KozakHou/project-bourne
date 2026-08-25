@@ -23,6 +23,7 @@ _CANDIDATE_STATES = {
 }
 _ACTIVATION_KINDS = {"none", "module", "virtualenv", "conda", "spack"}
 _MODULE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+/@-]{0,127}\Z")
+_CONTAINER_RUNTIMES = {"apptainer", "singularity"}
 
 
 def canonical_digest(value: object) -> str:
@@ -187,6 +188,100 @@ class ResolvedEnvironment:
             activation=EnvironmentActivation.from_dict(value["activation"]),
             evidence=list(value.get("evidence", [])),
             unresolved=list(value.get("unresolved", [])),
+        )
+
+
+@dataclass(frozen=True)
+class ContainerMount:
+    """One explicit host-to-container bind used by an existing image."""
+
+    source: str
+    destination: str
+    read_only: bool = True
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.source, str)
+            or not isinstance(self.destination, str)
+            or not self.source.startswith("/")
+            or not self.destination.startswith("/")
+            or len(self.source) > 16384
+            or len(self.destination) > 16384
+        ):
+            raise ValueError("container bind paths must be absolute")
+        # Apptainer/Singularity bind specifications use ':' for fields and may
+        # use ',' for lists. Reject both so one typed mount cannot be
+        # reinterpreted as different or additional mounts by the runtime.
+        if any(
+            character in self.source or character in self.destination
+            for character in "\n\r\0:,"
+        ):
+            raise ValueError("container bind paths contain unsafe characters")
+        if not isinstance(self.read_only, bool):
+            raise ValueError("container bind read_only must be boolean")
+
+
+@dataclass(frozen=True)
+class ContainerExecution:
+    """A narrow request to execute inside an already-present container image."""
+
+    runtime: str
+    image: str
+    mounts: tuple[ContainerMount, ...] = ()
+    clean_environment: bool = True
+    image_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.runtime, str) or self.runtime not in _CONTAINER_RUNTIMES:
+            raise ValueError(f"unsupported container runtime: {self.runtime}")
+        if (
+            not isinstance(self.image, str)
+            or not self.image.startswith("/")
+            or len(self.image) > 16384
+        ):
+            raise ValueError("container image must be an absolute existing-image path")
+        if any(character in self.image for character in "\n\r\0"):
+            raise ValueError("container image path contains unsafe characters")
+        if len(self.mounts) > 128:
+            raise ValueError("container bind list exceeds the safety limit")
+        if not all(isinstance(item, ContainerMount) for item in self.mounts):
+            raise ValueError("container mounts must be typed bind records")
+        if not isinstance(self.clean_environment, bool):
+            raise ValueError("container clean_environment must be boolean")
+        if self.image_digest is not None and (
+            not isinstance(self.image_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.image_digest) is None
+        ):
+            raise ValueError("container image digest must use sha256:<hex>")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "runtime": self.runtime,
+            "image": self.image,
+            "mounts": [asdict(item) for item in self.mounts],
+            "clean_environment": self.clean_environment,
+            "image_digest": self.image_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ContainerExecution":
+        if set(value) - {
+            "runtime", "image", "mounts", "clean_environment", "image_digest"
+        }:
+            raise ValueError("container execution contains unknown fields")
+        mounts = value.get("mounts", [])
+        if not isinstance(mounts, list) or not all(
+            isinstance(item, dict)
+            and not set(item) - {"source", "destination", "read_only"}
+            for item in mounts
+        ):
+            raise ValueError("container mounts must be bounded objects")
+        return cls(
+            runtime=value["runtime"],
+            image=value["image"],
+            mounts=tuple(ContainerMount(**item) for item in mounts),
+            clean_environment=value.get("clean_environment", True),
+            image_digest=value.get("image_digest"),
         )
 
 

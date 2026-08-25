@@ -52,6 +52,9 @@ class ExecutionResult:
     exit_code: int
     stdout: str
     stderr: str
+    termination_signal: int | None = None
+    launch_error: bool = False
+    runtime_capture: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

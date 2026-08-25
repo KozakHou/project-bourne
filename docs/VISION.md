@@ -367,7 +367,7 @@ The v0.7 site-aware workflow distinguishes:
 * the local control machine and local SQLite authority;
 * an existing OpenSSH connection to a configured access site;
 * a one-shot, user-space, non-AI access-node worker;
-* the Slurm/PBS scheduler that owns accepted job lifetime;
+* the Slurm/PBS/LSF scheduler that owns accepted job lifetime;
 * an execution-scoped worker inside the compute allocation; and
 * the exact scientific argv and actual execution context.
 

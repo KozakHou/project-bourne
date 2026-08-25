@@ -33,12 +33,12 @@ def resource_shapes_from_inventory(snapshot: InventorySnapshot) -> list[Resource
     for target in snapshot.execution_targets:
         raw_shapes = target.metadata.get("resource_shapes")
         if raw_shapes is None:
-            # Slurm/PBS discovery describes bounded target classes rather than
+            # Scheduler discovery describes bounded target classes rather than
             # concrete allocations. Preserve those partial facts as a shape,
             # but do not turn visible capacity/queue maxima into a request and
             # do not turn visibility into authorization.
             scheduler = target.metadata.get("scheduler")
-            if scheduler not in {"slurm", "pbs"}:
+            if scheduler not in {"slurm", "pbs", "lsf"}:
                 continue
             normalized: dict[str, Any] = {"scheduler_class": target.name}
             if scheduler == "slurm":
@@ -104,7 +104,7 @@ def generate_resource_shapes(
                     )
                 except (TypeError, ValueError):
                     continue
-        elif target.metadata.get("scheduler") in {"slurm", "pbs"}:
+        elif target.metadata.get("scheduler") in {"slurm", "pbs", "lsf"}:
             generated.extend(
                 _generated_target_shapes(target, workload, hints, policy_claims, limit)
             )
@@ -167,9 +167,16 @@ def _generated_target_shapes(
         else:
             cpu_values = (None,)
         for provisional_cpus in cpu_values:
+            provider_nodes = _provider_layout_nodes(
+                total_cpus=provisional_cpus,
+                mpi_ranks=mpi_ranks,
+                hinted_nodes=hints.get("nodes"),
+                hinted_cpus_per_node=hints.get("cpus_per_node"),
+                hinted_ranks_per_node=hints.get("ranks_per_node"),
+            )
             node_values = _derived_node_values(
                 requested_nodes=requested.nodes,
-                hinted_nodes=hints.get("nodes"),
+                hinted_nodes=provider_nodes,
                 total_cpus=provisional_cpus,
                 mpi_ranks=mpi_ranks,
                 gpus=requested.gpus,
@@ -177,32 +184,58 @@ def _generated_target_shapes(
                 capacity=capacity,
                 hard_max_nodes=max_nodes,
                 limit=limit,
+                preserve_unknown_topology=scheduler == "lsf",
             )
             for nodes in node_values:
-                total_cpus = nodes if provisional_cpus is None else provisional_cpus
-                if total_cpus % nodes or (mpi_ranks is not None and mpi_ranks % nodes):
+                total_cpus = (
+                    provisional_cpus
+                    if provisional_cpus is not None or nodes is None
+                    else nodes
+                )
+                if (
+                    nodes is not None
+                    and (
+                        total_cpus % nodes
+                        or (mpi_ranks is not None and mpi_ranks % nodes)
+                    )
+                ):
                     continue
-                if mpi_ranks is not None and total_cpus % mpi_ranks:
+                if (
+                    mpi_ranks is not None
+                    and total_cpus is not None
+                    and total_cpus % mpi_ranks
+                ):
                     continue
                 gpus = requested.gpus
-                if gpus is not None and gpus % nodes:
+                if nodes is not None and gpus is not None and gpus % nodes:
                     continue
                 memory = requested.memory_bytes
-                if memory is not None and memory % nodes:
+                if nodes is not None and memory is not None and memory % nodes:
                     continue
                 shape = ResourceShape(
                     nodes=nodes,
-                    cpus_per_node=total_cpus // nodes,
+                    cpus_per_node=(
+                        None if nodes is None or total_cpus is None
+                        else total_cpus // nodes
+                    ),
                     total_cpus=total_cpus,
                     mpi_ranks=mpi_ranks,
-                    ranks_per_node=None if mpi_ranks is None else mpi_ranks // nodes,
+                    ranks_per_node=(
+                        None if nodes is None or mpi_ranks is None
+                        else mpi_ranks // nodes
+                    ),
                     threads_per_rank=(
-                        None if mpi_ranks is None else total_cpus // mpi_ranks
+                        None if mpi_ranks is None or total_cpus is None
+                        else total_cpus // mpi_ranks
                     ),
                     gpus=gpus,
-                    gpus_per_node=None if gpus is None else gpus // nodes,
+                    gpus_per_node=(
+                        None if nodes is None or gpus is None else gpus // nodes
+                    ),
                     memory_bytes=memory,
-                    memory_per_node_bytes=None if memory is None else memory // nodes,
+                    memory_per_node_bytes=(
+                        None if nodes is None or memory is None else memory // nodes
+                    ),
                     architecture=_bounded_metadata_string(metadata.get("architecture")),
                     node_class=_bounded_metadata_string(metadata.get("node_class")),
                     walltime_seconds=requested.walltime_seconds,
@@ -212,12 +245,19 @@ def _generated_target_shapes(
                 )
                 if not _within_observed_capacity(shape, capacity):
                     continue
-                capacity_evidence = {
+                capacity_evidence: dict[str, Any] = {
                     "kind": "observed_now",
                     "scope": "scheduler_target_capacity",
                     "target_id": target.id,
                     "capacity": capacity,
+                    "topology": "unknown" if nodes is None else "derived",
                 }
+                if provider_nodes and nodes in provider_nodes:
+                    capacity_evidence["provider_layout_hints"] = {
+                        key: list(hints[key])
+                        for key in ("nodes", "cpus_per_node", "ranks_per_node")
+                        if key in hints
+                    }
                 shape = ResourceShape.from_dict(
                     {**shape.to_dict(), "evidence": [capacity_evidence]}
                 )
@@ -240,11 +280,14 @@ def _derived_node_values(
     capacity: dict[str, int],
     hard_max_nodes: int | None,
     limit: int,
-) -> tuple[int, ...]:
+    preserve_unknown_topology: bool = False,
+) -> tuple[int | None, ...]:
     """Derive exact, capacity-feasible allocation widths without guessing access."""
 
     # Explicit request intent is authoritative. Policy evaluation can reject it,
     # but generation must not silently replace it with automatic alternatives.
+    if hard_max_nodes is not None and hard_max_nodes < 1:
+        return ()
     if requested_nodes is not None:
         return (requested_nodes,)
     if hinted_nodes:
@@ -269,6 +312,8 @@ def _derived_node_values(
         if value is not None and value > 0
     ]
     if not known_bounds or not aggregate_values:
+        if preserve_unknown_topology:
+            return (None,)
         return (1,) if hard_max_nodes is None or hard_max_nodes >= 1 else ()
 
     minimum_nodes = max(1, *known_bounds)
@@ -281,6 +326,32 @@ def _derived_node_values(
         and (memory_bytes is None or memory_bytes % nodes == 0)
     ]
     return tuple(values[:limit])
+
+
+def _provider_layout_nodes(
+    *,
+    total_cpus: int | None,
+    mpi_ranks: int | None,
+    hinted_nodes: tuple[int, ...] | None,
+    hinted_cpus_per_node: tuple[int, ...] | None,
+    hinted_ranks_per_node: tuple[int, ...] | None,
+) -> tuple[int, ...] | None:
+    """Derive only node counts directly justified by provider layout hints."""
+
+    values = set(hinted_nodes or ())
+    if total_cpus is not None:
+        values.update(
+            total_cpus // per_node
+            for per_node in hinted_cpus_per_node or ()
+            if per_node > 0 and total_cpus % per_node == 0
+        )
+    if mpi_ranks is not None:
+        values.update(
+            mpi_ranks // per_node
+            for per_node in hinted_ranks_per_node or ()
+            if per_node > 0 and mpi_ranks % per_node == 0
+        )
+    return tuple(sorted(value for value in values if value > 0)) or None
 
 
 def _positive_divisors(value: int) -> tuple[int, ...]:
@@ -717,6 +788,19 @@ def _evaluate_candidate(
         state = "unresolved"
         unresolved.extend(item.message for item in authorization_reasons)
     requirement_reasons = _resource_requirements(workload.resources, shape)
+    if shape.placement.get("scheduler") == "lsf":
+        for name, requested in (
+            ("memory", workload.resources.memory_bytes),
+            ("GPU", workload.resources.gpus),
+        ):
+            if requested not in {None, 0}:
+                requirement_reasons.append(
+                    CandidateReason(
+                        "resource_unknown",
+                        f"LSF {name} request mapping is unresolved for this site",
+                        "unknown",
+                    )
+                )
     reasons.extend(requirement_reasons)
     if any(item.code == "resource_incompatible" for item in requirement_reasons):
         state = "hard_invalid"
