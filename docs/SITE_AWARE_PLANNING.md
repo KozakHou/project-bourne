@@ -274,7 +274,9 @@ v0.8 can bind an already-existing Apptainer/Singularity image to the selected
 immutable plan. The compute worker rechecks the runtime, image, optional
 SHA-256 digest, and bounded bind sources before executing exact scientific
 argv. It does not build, pull, install, convert, or manage images and does not
-require Docker. See [Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md).
+require Docker. It does not orchestrate multi-node container launch, choose
+MPI-launcher/container ordering, or inject MPI launchers. See
+[Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md).
 
 ## Submission ownership and ambiguous transport
 

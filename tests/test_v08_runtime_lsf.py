@@ -20,6 +20,8 @@ from bourneprov.backends import (
 )
 from bourneprov.bounded_subprocess import BoundedCommandResult
 from bourneprov.compute_worker import _load_plan, _observe_allocation, execute_plan
+from bourneprov.compute_worker import _runtime_evidence
+from bourneprov.constraint_providers import DeclarativeConstraintProvider
 from bourneprov.discovery_providers import LSFProvider
 from bourneprov.execution_request import execution_request_from_cli
 from bourneprov.execution import execute_command
@@ -30,7 +32,9 @@ from bourneprov.inventory_storage import InventoryStore
 from bourneprov.planning_models import ContainerExecution, ContainerMount, ResourceShape
 from bourneprov.models import SystemProvenance
 from bourneprov.resolver import resolve_execution
+from bourneprov.site_planning import generate_resource_shapes
 from bourneprov.storage import ExperimentStore
+from bourneprov import remote_worker
 from bourneprov.worker_result import encode_worker_result, parse_worker_result
 from bourneprov.worker_bundle import write_staged_plan
 from bourneprov.workload import inspect_workload, utc_now
@@ -39,6 +43,7 @@ from bourneprov.workload_models import (
     ExecutionAttempt,
     ExecutionConstraints,
     ResourceRequirements,
+    SchedulerJob,
 )
 from bourneprov.workload_storage import ExecutionStore
 from bourneprov.workload_presentation import format_execution
@@ -153,7 +158,7 @@ class LSFBackendTests(unittest.TestCase):
         self.assertIn("#BSUB -W 2", script)
         self.assertNotIn("literal;not-shell", script)
 
-    def test_submit_active_historical_cancel_and_exact_identity(self) -> None:
+    def test_submit_active_recent_finished_cancel_and_exact_identity(self) -> None:
         calls: list[tuple[list[str], bytes | None]] = []
         active = True
 
@@ -283,6 +288,418 @@ class LSFBackendTests(unittest.TestCase):
         self.assertEqual(allocation.resources["mpi_ranks"], 8)
         self.assertEqual(allocation.resources["gpus"], 2)
         self.assertNotIn("SECRET_TOKEN", str(allocation.evidence))
+
+    def _observe_job(
+        self,
+        responses: dict[str, tuple[str, str, int]],
+        *,
+        bhist_available: bool = True,
+    ):
+        calls: list[list[str]] = []
+
+        def runner(argv, **_kwargs):
+            values = list(argv)
+            calls.append(values)
+            if Path(values[0]).name == "bhist":
+                stage = "historical"
+            elif "-a" in values:
+                stage = "recent"
+            else:
+                stage = "active"
+            stdout, stderr, returncode = responses[stage]
+            return result(values, stdout, stderr, returncode)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            ExperimentStore(database).initialize()
+            backend = LSFBackend(ExecutionStore(database), root / "stage", runner=runner)
+            job = SchedulerJob(
+                execution_id=new_ulid(), family="lsf", job_id="4182",
+                submitting_identity="scientist", submitted_at=utc_now(),
+                state="submitted", last_observed_at=utc_now(),
+            )
+            with patch(
+                "bourneprov.backends.shutil.which",
+                side_effect=lambda name: (
+                    "/opt/lsf/bin/bhist"
+                    if name == "bhist" and bhist_available
+                    else None
+                ),
+            ):
+                observation = backend._observe_job(job, "/opt/lsf/bin/bjobs")
+        return observation, calls
+
+    def test_lsf_reconciliation_separates_active_recent_and_durable_history(self) -> None:
+        missing = ("", "Job <4182> is not found", 255)
+        active, active_calls = self._observe_job(
+            {"active": ("4182 RUN\n", "", 0), "recent": missing, "historical": missing}
+        )
+        recent, recent_calls = self._observe_job(
+            {"active": missing, "recent": ("4182 DONE\n", "", 0), "historical": missing}
+        )
+        historical, historical_calls = self._observe_job(
+            {
+                "active": missing,
+                "recent": missing,
+                "historical": (
+                    "Job <4182>, User <scientist>, Status <DONE>, Queue <normal>\n",
+                    "", 0,
+                ),
+            }
+        )
+
+        self.assertEqual((active.state, active.source, active.raw_state), ("running", "active", "RUN"))
+        self.assertEqual(len(active_calls), 1)
+        self.assertEqual((recent.state, recent.source, recent.raw_state), ("completed", "recent_finished", "DONE"))
+        self.assertEqual(len(recent_calls), 2)
+        self.assertEqual(
+            (historical.state, historical.source, historical.raw_state),
+            ("completed", "historical_accounting", "DONE"),
+        )
+        bhist = historical_calls[-1]
+        self.assertEqual(Path(bhist[0]).name, "bhist")
+        self.assertIn("-n", bhist)
+        self.assertIn("0", bhist)
+        self.assertEqual(bhist[-1], "4182")
+        self.assertTrue(historical.terminal)
+
+    def test_lsf_missing_or_malformed_durable_history_remains_unobservable(self) -> None:
+        missing = ("", "Job <4182> is not found", 255)
+        unavailable, _calls = self._observe_job(
+            {"active": missing, "recent": missing, "historical": missing},
+            bhist_available=False,
+        )
+        malformed, calls = self._observe_job(
+            {
+                "active": missing,
+                "recent": missing,
+                "historical": (
+                    "Job <9999>, User <other>, Status <DONE>\n", "", 0
+                ),
+            }
+        )
+
+        self.assertEqual(unavailable.state, "unobservable")
+        self.assertEqual(unavailable.source, "historical_accounting_unavailable")
+        self.assertFalse(unavailable.observable)
+        self.assertFalse(unavailable.terminal)
+        self.assertEqual(malformed.state, "unobservable")
+        self.assertEqual(malformed.source, "historical_accounting")
+        self.assertFalse(malformed.observable)
+        self.assertIn("unique exact job", malformed.diagnostic or "")
+        self.assertEqual(Path(calls[-1][0]).name, "bhist")
+
+    def test_lsf_uncertain_and_post_processing_states_are_not_conflated(self) -> None:
+        expected = {
+            "UNKWN": ("scheduler_uncertain", False),
+            "ZOMBI": ("scheduler_uncertain", False),
+            "POST_DONE": ("post_processing_completed", True),
+            "POST_ERR": ("post_processing_failed", True),
+        }
+        for raw_state, (normalized, terminal) in expected.items():
+            with self.subTest(raw_state=raw_state):
+                observation, _calls = self._observe_job(
+                    {
+                        "active": (f"4182 {raw_state}\n", "", 0),
+                        "recent": ("", "", 0),
+                        "historical": ("", "", 0),
+                    }
+                )
+                self.assertEqual(observation.state, normalized)
+                self.assertEqual(observation.raw_state, raw_state)
+                self.assertEqual(observation.terminal, terminal)
+
+    def test_lsf_wait_preserves_uncertainty_without_collection_failure(self) -> None:
+        def runner(argv, **_kwargs):
+            values = list(argv)
+            if Path(values[0]).name == "bsub":
+                return result(values, "Job <4182> is submitted.\n")
+            return result(values, "4182 UNKWN\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store, snapshot, workload, plan, execution = self._execution(root)
+            backend = LSFBackend(store, root / "stage", runner=runner)
+            with patch(
+                "bourneprov.backends.shutil.which",
+                side_effect=lambda name: f"/opt/lsf/bin/{name}",
+            ):
+                backend.execute(execution, plan, workload, snapshot)
+                with self.assertRaises(TimeoutError):
+                    backend.wait(
+                        store.get_execution(execution.id),
+                        poll_seconds=0.05, timeout_seconds=0,
+                    )
+            current = store.get_execution(execution.id)
+            details = store.events(execution.id)[-1].details
+
+        self.assertEqual(current.state, "scheduler_unobservable")
+        self.assertEqual(details["raw_scheduler_state"], "UNKWN")
+        self.assertNotEqual(current.state, "collection_failed")
+
+
+class RemoteLSFReconciliationTests(unittest.TestCase):
+    def _state(self) -> dict[str, str]:
+        return {
+            "scheduler_family": "lsf", "job_id": "4182",
+            "submitting_identity": "scientist",
+        }
+
+    def test_remote_reconciliation_uses_recent_then_exact_durable_history(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(argv, **_kwargs):
+            values = list(argv)
+            calls.append(values)
+            if Path(values[0]).name == "bhist":
+                return result(
+                    values,
+                    "Job <4182>, User <scientist>, Status <DONE>, Queue <normal>\n",
+                )
+            return result(values, stderr="Job <4182> is not found", returncode=255)
+
+        with patch(
+            "bourneprov.remote_worker.shutil.which",
+            side_effect=lambda name: f"/opt/lsf/bin/{name}",
+        ), patch(
+            "bourneprov.remote_worker.run_bounded_command", side_effect=runner,
+        ):
+            observation = remote_worker._scheduler_observation(self._state())
+
+        self.assertEqual(observation["state"], "completed")
+        self.assertEqual(observation["source"], "historical_accounting")
+        self.assertEqual(observation["raw_scheduler_state"], "DONE")
+        self.assertEqual([Path(call[0]).name for call in calls], ["bjobs", "bjobs", "bhist"])
+        self.assertEqual(calls[-1][-1], "4182")
+
+    def test_remote_missing_and_malformed_history_remain_unknown(self) -> None:
+        missing = result([], stderr="Job <4182> is not found", returncode=255)
+
+        with patch(
+            "bourneprov.remote_worker.shutil.which",
+            side_effect=lambda name: None if name == "bhist" else f"/opt/lsf/bin/{name}",
+        ), patch(
+            "bourneprov.remote_worker.run_bounded_command", return_value=missing,
+        ):
+            unavailable = remote_worker._scheduler_observation(self._state())
+
+        def malformed_runner(argv, **_kwargs):
+            values = list(argv)
+            if Path(values[0]).name == "bhist":
+                return result(values, "Job <9999>, Status <DONE>\n")
+            return result(values, stderr="Job <4182> is not found", returncode=255)
+
+        with patch(
+            "bourneprov.remote_worker.shutil.which",
+            side_effect=lambda name: f"/opt/lsf/bin/{name}",
+        ), patch(
+            "bourneprov.remote_worker.run_bounded_command", side_effect=malformed_runner,
+        ):
+            malformed = remote_worker._scheduler_observation(self._state())
+
+        self.assertEqual(unavailable["source"], "historical_accounting_unavailable")
+        self.assertFalse(unavailable["observable"])
+        self.assertEqual(malformed["source"], "historical_accounting")
+        self.assertFalse(malformed["observable"])
+        self.assertFalse(malformed["terminal"])
+
+    def test_remote_reconcile_without_result_preserves_uncertain_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            execution_id = new_ulid()
+            staging = root / ".bourne" / "executions" / execution_id
+            staging.mkdir(parents=True)
+            remote_worker._write_state(
+                staging / "submission-state.json",
+                {
+                    "execution_id": execution_id, "scheduler_family": "lsf",
+                    "job_id": "4182", "submitting_identity": "scientist",
+                    "staging_directory": str(staging), "state": "submitted",
+                    "created_at": utc_now(), "updated_at": utc_now(),
+                },
+            )
+            with patch(
+                "bourneprov.remote_worker._scheduler_observation",
+                return_value={
+                    "state": "scheduler_uncertain", "observable": True,
+                    "terminal": False, "source": "active",
+                    "raw_scheduler_state": "ZOMBI",
+                },
+            ):
+                status, data = remote_worker._reconcile(
+                    {"execution_id": execution_id, "staging_directory": str(staging)}
+                )
+
+        self.assertEqual(status, "unknown")
+        self.assertEqual(data["result_state"], "absent")
+        self.assertEqual(data["scheduler"]["raw_scheduler_state"], "ZOMBI")
+
+
+class LSFTopologyPlanningTests(unittest.TestCase):
+    def _case(self, root: Path, *, nodes: int | None = None):
+        snapshot = inventory_snapshot(root, scheduler_families=("lsf",))
+        workload = inspect_workload(
+            ["solver", "case.in"], cwd=root,
+            resources=ResourceRequirements(cpus=512, nodes=nodes, mpi_ranks=512),
+            constraints=ExecutionConstraints(backend="lsf"),
+        )
+        return snapshot, workload
+
+    def test_unknown_lsf_topology_stays_unknown_and_requests_only_total_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, workload = self._case(root)
+            first = generate_resource_shapes(snapshot, workload)
+            second = generate_resource_shapes(snapshot, workload)
+            plan = resolve_execution(workload, snapshot).selected
+            self.assertIsNotNone(plan)
+            plan = replace(plan, resource_shape=first[0])
+            script = render_batch_script(
+                "lsf", plan, Path("worker.pyz"), Path("plan.json"),
+                Path("result.json"), new_ulid(),
+                target_name=snapshot.execution_targets[0].name,
+            )
+
+        self.assertEqual(len(first), 1)
+        self.assertIsNone(first[0].nodes)
+        self.assertIsNone(first[0].cpus_per_node)
+        self.assertIsNone(first[0].ranks_per_node)
+        self.assertEqual(first[0].total_cpus, 512)
+        self.assertEqual(first[0].mpi_ranks, 512)
+        self.assertIn("#BSUB -n 512", script)
+        self.assertNotIn("span[", script)
+        self.assertEqual(
+            [item.identity for item in first], [item.identity for item in second]
+        )
+        self.assertNotIn("preference", str(first[0].evidence).casefold())
+
+    def test_explicit_lsf_nodes_authorize_exact_ptile_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, workload = self._case(root, nodes=8)
+            shapes = generate_resource_shapes(snapshot, workload)
+            plan = resolve_execution(workload, snapshot).selected
+            self.assertIsNotNone(plan)
+            plan = replace(plan, resource_shape=shapes[0])
+            script = render_batch_script(
+                "lsf", plan, Path("worker.pyz"), Path("plan.json"),
+                Path("result.json"), new_ulid(),
+                target_name=snapshot.execution_targets[0].name,
+            )
+
+        self.assertEqual(len(shapes), 1)
+        self.assertEqual(shapes[0].nodes, 8)
+        self.assertEqual(shapes[0].ranks_per_node, 64)
+        self.assertIn('#BSUB -R "span[ptile=64]"', script)
+
+    def test_provider_per_host_contract_can_derive_bounded_lsf_layout(self) -> None:
+        provider = DeclarativeConstraintProvider.from_dict(
+            {
+                "kind": "bourne.constraint-provider", "schema_version": 1,
+                "name": "fixed-layout", "provider_version": "1",
+                "parameters": [],
+                "constraints": [
+                    {
+                        "id": "ranks", "operator": "equal", "hard": True,
+                        "left": {"resource": "mpi_ranks"},
+                        "right": {"constant": 512},
+                    },
+                    {
+                        "id": "rank-layout", "operator": "equal", "hard": True,
+                        "left": {"resource": "ranks_per_node"},
+                        "right": {"constant": 64},
+                    },
+                ],
+                "environment_requirements": [], "launcher_requirements": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, workload = self._case(root)
+            shapes = generate_resource_shapes(snapshot, workload, provider=provider)
+
+        self.assertEqual({item.nodes for item in shapes}, {8})
+        self.assertEqual(shapes[0].ranks_per_node, 64)
+        self.assertTrue(
+            any("provider_layout_hints" in item for item in shapes[0].evidence)
+        )
+
+
+class SlurmAllocationTruthTests(unittest.TestCase):
+    def test_heterogeneous_whole_job_cpu_layout_is_summed_exactly(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SLURM_JOB_ID": "77", "SLURM_JOB_NUM_NODES": "3",
+                "SLURM_JOB_CPUS_PER_NODE": "72(x2),36",
+                "SLURM_CPUS_ON_NODE": "72",
+                "SLURM_JOB_NODELIST": "n[01-03]",
+            },
+            clear=True,
+        ):
+            allocation = _observe_allocation(new_ulid())
+
+        self.assertEqual(allocation.resources["cpus_per_node_allocation"], [72, 72, 36])
+        self.assertEqual(allocation.resources["cpus"], 180)
+        self.assertNotEqual(allocation.resources["cpus"], 216)
+        self.assertEqual(allocation.resources["local_cpus_on_node"], 72)
+        self.assertNotIn("cpus_per_node", allocation.resources)
+        self.assertEqual(allocation.hosts, [])
+        self.assertEqual(allocation.evidence["host_scope"], "allocation")
+        self.assertEqual(
+            allocation.evidence["environment"]["slurm_job_nodelist"], "n[01-03]"
+        )
+
+    def test_local_node_cpu_fact_does_not_become_a_job_total(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SLURM_JOB_ID": "77", "SLURM_JOB_NUM_NODES": "3",
+                "SLURM_CPUS_ON_NODE": "72",
+            },
+            clear=True,
+        ):
+            allocation = _observe_allocation(new_ulid())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = inventory_snapshot(root)
+            workload = inspect_workload([sys.executable, "-c", "pass"], cwd=root)
+            plan = resolve_execution(workload, snapshot).selected
+            self.assertIsNotNone(plan)
+            plan = replace(
+                plan, backend="slurm", resource_shape=None,
+                requested_resources=ResourceRequirements(nodes=3, cpus=216),
+            )
+            evidence = _runtime_evidence(
+                new_ulid(), new_ulid(), {}, allocation,
+                {"environment_activation": None, "container": None}, plan,
+            )
+
+        self.assertEqual(allocation.resources["local_cpus_on_node"], 72)
+        self.assertNotIn("cpus", allocation.resources)
+        self.assertEqual(allocation.evidence["host_scope"], "local_only")
+        self.assertEqual(evidence.allocation.coverage, "partially_observed")
+        self.assertFalse(
+            any(item["resource"] == "cpus" for item in evidence.allocation.metrics["discrepancies"])
+        )
+
+    def test_homogeneous_whole_job_cpu_layout_is_summed(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SLURM_JOB_ID": "77", "SLURM_JOB_NUM_NODES": "3",
+                "SLURM_JOB_CPUS_PER_NODE": "72(x3)",
+                "SLURM_CPUS_ON_NODE": "72",
+            },
+            clear=True,
+        ):
+            allocation = _observe_allocation(new_ulid())
+
+        self.assertEqual(allocation.resources["cpus"], 216)
+        self.assertEqual(allocation.resources["cpus_per_node"], 72)
+        self.assertEqual(allocation.resources["cpus_per_node_allocation"], [72, 72, 72])
 
 
 class RuntimeEvidenceTests(unittest.TestCase):

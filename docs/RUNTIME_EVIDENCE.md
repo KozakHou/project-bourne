@@ -42,6 +42,13 @@ does not scan unrelated user or system workloads. These samples cover the
 process tree visible to this Compute Worker on this allocation node; they are
 not whole-cluster or automatically distributed per-node telemetry.
 
+For Slurm allocations, `SLURM_JOB_CPUS_PER_NODE` is parsed as whole-job CPU
+evidence, including compressed forms such as `72(x2),36`. In contrast,
+`SLURM_CPUS_ON_NODE` is local-node evidence and is not multiplied by the job's
+node count. Raw `SLURM_JOB_NODELIST` is retained as a bounded allocation fact;
+Bourne does not expand it or substitute the local hostname as though it were
+the complete allocation host list.
+
 On a platform without compatible `/proc` evidence, those groups are explicitly
 unavailable or unsupported. Missing NVIDIA tools or GPU evidence never blocks
 an otherwise valid workload. `CUDA_VISIBLE_DEVICES` can establish bounded
@@ -75,11 +82,18 @@ LSF is a first-class backend alongside Slurm and PBS:
   one exact numeric job ID;
 - active observation uses an exact-job `bjobs` query with selectable `jobid`
   and `stat` fields;
-- a separately labelled historical `bjobs -a` query is used only after the
+- a separately labelled recent-finished `bjobs -a` query is used only after the
   active view no longer establishes the job;
+- an exact-job `bhist -l -n 0` query provides durable historical accounting
+  after the recent-finished view expires; command time and output remain
+  bounded, and unavailable or malformed history remains unknown;
 - cancellation uses `bkill` for the exact job attached to the Bourne execution;
 - a timed-out or otherwise identity-ambiguous submission is never blindly
   resubmitted.
+
+Raw LSF state remains evidence. `UNKWN` and `ZOMBI` are non-terminal scheduler
+uncertainty, while `POST_DONE` and `POST_ERR` are separate post-processing
+outcomes rather than scientific workload outcomes.
 
 Portable resource mapping is deliberately narrow. Bourne maps queue, total
 CPU/MPI slots, divisible `span[ptile=...]` placement, and wall time. A
@@ -87,6 +101,11 @@ single-host request can use `span[hosts=1]`. Generic `-nnodes` is not emitted
 because IBM documents it as a CSM-specific option. LSF memory units and GPU
 request syntax are site-configurable, so v0.8 leaves those mappings unresolved
 instead of inventing a resource expression.
+
+When total ranks are known but node count and per-host capacity are not, the
+LSF shape keeps `nodes` and `ranks_per_node` unknown and emits only `#BSUB -n`.
+`span[ptile=...]` requires explicit nodes or a provider/per-host fact that
+justifies the placement.
 
 Inside an allocation the worker records an allowlist of `LSB_JOBID`,
 `LSB_QUEUE`, `LSB_HOSTS`, `LSB_MCPU_HOSTS`, `LSB_DJOB_NUMPROC`,
@@ -113,7 +132,10 @@ argv, never as a scientific shell string. A missing runtime, image, digest
 match, or bind source is `preflight_failed`; scientific argv does not start.
 
 Bourne does not build, pull, install, convert, or register images and does not
-manage Docker, a daemon, Kubernetes, or a container registry.
+manage Docker, a daemon, Kubernetes, or a container registry. v0.8 also does
+not automatically orchestrate multi-node container launch or choose whether an
+MPI launcher belongs outside or inside the container command. Bourne does not
+inject MPI launchers.
 
 ## Protocol and storage evolution
 
@@ -144,5 +166,6 @@ Current limitations include common IBM Spectrum LSF 10.x command/output forms
 rather than every vendor/site customization, Python 3 inside scheduler
 allocations, no whole-allocation multi-node telemetry aggregation, no automatic
 cross-cluster placement, no package/environment installation, and no automatic
-container image management. Control-plane support remains Linux and macOS;
+container image management or multi-node container/MPI ordering. Control-plane
+support remains Linux and macOS;
 native Windows is not yet supported or validated.

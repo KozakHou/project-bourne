@@ -20,8 +20,9 @@ boundary.
   reinterpretation.
 - `remote-worker v1` is unchanged.
 
-LSF uses bounded queue discovery, stdin `bsub` submission, exact-ID `bjobs`
-active/historical reconciliation, and exact-job `bkill`. Resource mapping is
+LSF uses bounded queue discovery, stdin `bsub` submission, exact-ID active
+`bjobs`, recent-finished `bjobs -a`, durable `bhist` reconciliation, and
+exact-job `bkill`. Resource mapping is
 limited to portable Bourne-owned concepts. Site-specific memory/GPU syntax and
 generic LSF expression building are intentionally excluded.
 
@@ -32,7 +33,8 @@ scheduler allocation.
 
 Apptainer/Singularity support uses existing local images only. There is no
 build, pull, install, registry, Docker-daemon, Kubernetes, or shell-string
-execution path.
+execution path. v0.8 does not orchestrate multi-node container launch, choose
+MPI-launcher/container ordering, or inject MPI launchers.
 
 ## Intentionally deferred
 

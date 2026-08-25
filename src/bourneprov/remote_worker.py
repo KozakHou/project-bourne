@@ -18,6 +18,17 @@ from .bounded_subprocess import BoundedCommandResult, run_bounded_command
 from .discovery import discover_site
 from .execution_request import ExecutionRequest
 from .inventory_storage import InventoryStore
+from .lsf import (
+    LSF_TERMINAL_STATES,
+    SAFE_LSF_JOB,
+    active_job_arguments,
+    historical_job_arguments,
+    lsf_job_is_unobservable,
+    normalize_lsf_state,
+    parse_bhist_job,
+    parse_bjobs_job,
+    recent_job_arguments,
+)
 from .remote_transport import (
     MAX_REMOTE_REQUEST_BYTES,
     REMOTE_PROTOCOL,
@@ -32,7 +43,7 @@ REMOTE_COMMAND_TIMEOUT = 15.0
 _EXECUTION_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}\Z")
 _SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
 _PBS_JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_LSF_JOB = re.compile(r"[0-9]+\Z")
+_LSF_JOB = SAFE_LSF_JOB
 _OPERATIONS = {
     "hello", "discover", "validate_plan", "prepare", "submit",
     "reconcile", "collect", "cancel",
@@ -318,8 +329,9 @@ def _reconcile(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 "diagnostic": "result bundle is invalid",
             }
         return "ok", {**data, "result": result, "result_state": "available"}
+    uncertain = observation["state"] in {"unknown", "scheduler_uncertain"}
     return (
-        "unknown" if not observation["observable"] else "ok",
+        "unknown" if not observation["observable"] or uncertain else "ok",
         {**data, "result": None, "result_state": "absent"},
     )
 
@@ -356,7 +368,7 @@ def _scheduler_observation(state: dict[str, Any]) -> dict[str, Any]:
         if family == "slurm"
         else [executable, "-f", job_id]
         if family == "pbs"
-        else [executable, "-noheader", "-u", identity, "-o", "jobid stat", job_id]
+        else [executable, *active_job_arguments(job_id, identity)]
     )
     result = run_bounded_command(argv, timeout=REMOTE_COMMAND_TIMEOUT)
     if family == "lsf":
@@ -369,14 +381,29 @@ def _scheduler_observation(state: dict[str, Any]) -> dict[str, Any]:
             return active
         if result.returncode == 0 and result.stdout.strip():
             return active
-        historical = run_bounded_command(
-            [
-                executable, "-a", "-noheader", "-u", identity,
-                "-o", "jobid stat", job_id,
-            ],
+        recent = run_bounded_command(
+            [executable, *recent_job_arguments(job_id, identity)],
             timeout=REMOTE_COMMAND_TIMEOUT,
         )
-        return _lsf_observation(historical, job_id, "historical_accounting")
+        recent_observation = _lsf_observation(recent, job_id, "recent_finished")
+        if recent_observation["observable"]:
+            return recent_observation
+        history_executable = shutil.which("bhist")
+        if history_executable is None:
+            return {
+                "state": "unobservable", "observable": False,
+                "terminal": False,
+                "source": "historical_accounting_unavailable",
+                "diagnostic": (
+                    "known job was absent from active and recent-finished LSF "
+                    "views; bhist is unavailable"
+                ),
+            }
+        historical = run_bounded_command(
+            [history_executable, *historical_job_arguments(job_id, identity)],
+            timeout=REMOTE_COMMAND_TIMEOUT,
+        )
+        return _lsf_history_observation(historical, job_id)
     if result.timed_out or result.returncode != 0:
         return {"state": "unobservable", "observable": False, "source": "active", "diagnostic": result.stderr[:4096]}
     if family == "slurm":
@@ -473,31 +500,49 @@ def _lsf_observation(
     if result.timed_out or result.returncode != 0:
         return {
             "state": "unobservable", "observable": False, "source": source,
+            "terminal": False,
             "diagnostic": (result.stderr or "LSF query failed")[:4096],
         }
-    rows = [line.split() for line in result.stdout.splitlines() if line.strip()]
-    rows = [row for row in rows if len(row) == 2 and row[0] == job_id]
-    if len(rows) != 1:
+    parsed = parse_bjobs_job(result.stdout, expected_job_id=job_id)
+    if parsed is None:
         return {
             "state": "unobservable", "observable": False, "source": source,
+            "terminal": False,
             "diagnostic": "no unique exact LSF job record",
         }
-    state = {
-        "PEND": "pending", "WAIT": "pending", "PROV": "pending",
-        "RUN": "running", "PSUSP": "suspended", "USUSP": "suspended",
-        "SSUSP": "suspended", "DONE": "completed", "EXIT": "failed",
-        "ZOMBI": "failed", "UNKWN": "unknown_terminal",
-    }.get(rows[0][1].upper(), "unknown")
-    return {"state": state, "observable": True, "source": source}
+    raw_state = parsed[1]
+    state = normalize_lsf_state(raw_state)
+    return {
+        "state": state, "observable": True, "source": source,
+        "terminal": state in LSF_TERMINAL_STATES,
+        "raw_scheduler_state": raw_state,
+    }
+
+
+def _lsf_history_observation(
+    result: BoundedCommandResult, job_id: str
+) -> dict[str, Any]:
+    source = "historical_accounting"
+    if result.timed_out or result.returncode != 0:
+        return {
+            "state": "unobservable", "observable": False, "terminal": False,
+            "source": source,
+            "diagnostic": (result.stderr or "exact-job bhist query failed")[:4096],
+        }
+    parsed = parse_bhist_job(result.stdout, expected_job_id=job_id)
+    if parsed is None:
+        return {
+            "state": "unobservable", "observable": False, "terminal": False,
+            "source": source,
+            "diagnostic": "bhist output did not contain one unique exact job record",
+        }
+    raw_state = parsed[1]
+    state = normalize_lsf_state(raw_state)
+    return {
+        "state": state, "observable": True, "terminal": state in LSF_TERMINAL_STATES,
+        "source": source, "raw_scheduler_state": raw_state,
+    }
 
 
 def _lsf_job_is_unobservable(result: BoundedCommandResult) -> bool:
-    diagnostic = f"{result.stderr}\n{result.stdout}".casefold()
-    return bool(
-        re.search(
-            r"job(?:\s+<[^>]+>)?\s+(?:is\s+not\s+found|not\s+found)"
-            r"|no\s+(?:unfinished\s+)?job\s+found"
-            r"|not\s+found\s+in\s+job\s+list",
-            diagnostic,
-        )
-    )
+    return lsf_job_is_unobservable(result)

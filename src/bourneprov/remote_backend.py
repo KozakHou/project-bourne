@@ -15,6 +15,7 @@ from .backends import (
     render_batch_script,
 )
 from .inventory_models import InventorySnapshot
+from .lsf import LSF_TERMINAL_STATES
 from .planning_models import ResourceShape
 from .remote_transport import RemoteTransportError, RemoteWorkerClient
 from .site_models import Site
@@ -235,10 +236,13 @@ class RemoteSchedulerBackend:
                 evidence = {} if remote is None else remote.get("evidence", {})
                 scheduler = evidence.get("scheduler", {})
                 state = scheduler.get("state") if isinstance(scheduler, dict) else None
-                if state in {
+                terminal_states = {
                     "completed", "failed", "cancelled", "finished", "timeout",
-                    "node_fail", "out_of_memory", "preempted", "unknown_terminal",
-                }:
+                    "node_fail", "out_of_memory", "preempted",
+                }
+                if execution.backend == "lsf":
+                    terminal_states = set(LSF_TERMINAL_STATES)
+                if state in terminal_states:
                     result_evidence = (
                         "partial"
                         if evidence.get("result_state") == "invalid"
@@ -382,7 +386,9 @@ class RemoteSchedulerBackend:
                     execution.id,
                     (
                         "scheduler_unobservable"
-                        if scheduler_state in {"unobservable", "unknown"}
+                        if scheduler_state in {
+                            "unobservable", "unknown", "scheduler_uncertain"
+                        }
                         else "queued"
                         if scheduler_state in {"pending", "queued", "configuring"}
                         else "running"

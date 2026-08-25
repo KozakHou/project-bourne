@@ -201,11 +201,14 @@ environment evidence with explicit `observed`, `partially_observed`,
 fail a valid workload and never becomes a fabricated zero.
 
 IBM LSF joins Slurm and PBS with bounded queue discovery, `bsub`, exact-job
-active and historical `bjobs` reconciliation, and `bkill`. Existing
+active `bjobs`, recent-finished `bjobs -a`, durable `bhist` reconciliation,
+and `bkill`. Existing
 Apptainer/Singularity images can be frozen into a selected site-aware plan;
 Bourne verifies the existing runtime/image on the compute side and passes the
 scientific command as exact argv. It does not build, pull, install, or manage
-images. See [runtime evidence and scheduler coverage](docs/RUNTIME_EVIDENCE.md).
+images. v0.8 does not orchestrate multi-node container launch, choose
+MPI-launcher/container ordering, or inject an MPI launcher. See
+[runtime evidence and scheduler coverage](docs/RUNTIME_EVIDENCE.md).
 
 ## Core architecture
 

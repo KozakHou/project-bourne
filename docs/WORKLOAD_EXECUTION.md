@@ -97,8 +97,11 @@ other status-command failures remain explicit query errors.
 `LSFBackend` submits the Bourne-owned script to `bsub` on stdin, captures one
 exact numeric job ID, queries only that job and submitting identity with
 selectable `bjobs` fields, and cancels only that recorded job with `bkill`.
-Active and historical `bjobs -a` observations have distinct evidence sources.
-Disappearance from the active view alone never establishes completion. A
+Active `bjobs`, recent-finished `bjobs -a`, and durable historical `bhist -n 0`
+observations have distinct evidence sources. `UNKWN` and `ZOMBI` preserve
+scheduler uncertainty; `POST_DONE` and `POST_ERR` preserve distinct
+post-processing outcomes. Disappearance from the active and recent views alone
+never establishes completion. A
 timed-out submission or an accepted-looking response without one exact job ID
 is `submission_ambiguous` and is not blindly retried.
 
@@ -182,7 +185,9 @@ future SDK/MCP boundary.
   virtualenv, and Spack environments. It does not install dependencies, build
   environments, inject launchers, or infer site policy. Its container support
   executes an already-existing Apptainer/Singularity image only; it does not
-  build, pull, convert, install, or manage images.
+  build, pull, convert, install, or manage images. It also does not orchestrate
+  multi-node container launch, choose MPI-launcher/container ordering, or
+  inject an MPI launcher.
 - Remote SSH execution is scheduler-mediated only. There is no disconnect-safe
   direct remote execution, arbitrary remote shell, blind submission retry, or
   generic remote file browser.

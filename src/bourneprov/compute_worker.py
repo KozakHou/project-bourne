@@ -31,11 +31,14 @@ from .workload_models import AllocationObservation, ExecutionPlan, WorkloadSpec
 
 MAX_PLAN_BYTES = 1024 * 1024
 MAX_CAPTURE_BYTES_PER_STREAM = 8 * 1024 * 1024
+MAX_ALLOCATION_ENVIRONMENT_VALUE = 16 * 1024
 _ALLOCATION_ENVIRONMENT = {
     "SLURM_JOB_ID": "slurm_job_id",
     "SLURM_JOB_PARTITION": "slurm_partition",
     "SLURM_JOB_NUM_NODES": "nodes",
-    "SLURM_CPUS_ON_NODE": "cpus_per_node",
+    "SLURM_CPUS_ON_NODE": "slurm_cpus_on_node",
+    "SLURM_JOB_CPUS_PER_NODE": "slurm_job_cpus_per_node",
+    "SLURM_JOB_NODELIST": "slurm_job_nodelist",
     "SLURM_NTASKS": "mpi_ranks",
     "SLURM_GPUS": "slurm_gpus",
     "PBS_JOBID": "pbs_job_id",
@@ -258,19 +261,37 @@ def _validate_staged_models(
 def _observe_allocation(
     execution_id: str, *, direct: bool = False
 ) -> AllocationObservation:
-    raw = {
-        field: value
-        for variable, field in _ALLOCATION_ENVIRONMENT.items()
-        if (value := os.environ.get(variable)) is not None
-    }
+    oversized_fields: list[str] = []
+    raw: dict[str, str] = {}
+    for variable, field in _ALLOCATION_ENVIRONMENT.items():
+        value = os.environ.get(variable)
+        if value is None:
+            continue
+        if len(value) > MAX_ALLOCATION_ENVIRONMENT_VALUE:
+            oversized_fields.append(field)
+            continue
+        raw[field] = value
     resources: dict[str, Any] = {}
-    for key in ("nodes", "cpus_per_node", "mpi_ranks", "cpus"):
+    for key in ("nodes", "mpi_ranks", "cpus"):
         if key in raw:
             parsed = _positive_int(raw[key])
             if parsed is not None:
                 resources[key] = parsed
-    if "nodes" in resources and "cpus_per_node" in resources:
-        resources["cpus"] = resources["nodes"] * resources["cpus_per_node"]
+    slurm_cpu_layout = _parse_slurm_cpus_per_node(
+        raw.get("slurm_job_cpus_per_node")
+    )
+    if slurm_cpu_layout is not None:
+        resources["cpus_per_node_allocation"] = slurm_cpu_layout
+        resources["cpus"] = sum(slurm_cpu_layout)
+        resources.setdefault("nodes", len(slurm_cpu_layout))
+        if len(set(slurm_cpu_layout)) == 1:
+            resources["cpus_per_node"] = slurm_cpu_layout[0]
+    local_slurm_cpus = _positive_int(raw.get("slurm_cpus_on_node", ""))
+    if local_slurm_cpus is not None:
+        resources["local_cpus_on_node"] = local_slurm_cpus
+        if resources.get("nodes") == 1 and slurm_cpu_layout is None:
+            resources["cpus_per_node"] = local_slurm_cpus
+            resources["cpus"] = local_slurm_cpus
     if value := raw.get("lsf_mcpu_hosts"):
         fields = value.split()
         if len(fields) % 2 == 0:
@@ -293,10 +314,33 @@ def _observe_allocation(
         except Exception:
             pass
     hosts = _allocation_hosts(raw)
+    local_host = platform.node() or "unknown"
+    if hosts:
+        host_scope = "allocation"
+    elif raw.get("slurm_job_nodelist"):
+        host_scope = "allocation"
+    elif direct or any(
+        key in raw
+        for key in (
+            "slurm_job_id", "pbs_job_id", "lsf_job_id", "slurm_cpus_on_node"
+        )
+    ):
+        host_scope = "local_only"
+        hosts = [local_host]
+    else:
+        # The worker always knows its own execution host, but that local fact
+        # must never be presented as the complete scheduler allocation.
+        host_scope = "local_only"
+        hosts = [local_host]
     return AllocationObservation(
         id=new_ulid(), execution_id=execution_id, observed_at=utc_now(),
-        resources=resources, hosts=hosts or [platform.node() or "unknown"],
-        evidence={"environment": raw, "source": "compute_worker_allowlist"},
+        resources=resources, hosts=hosts,
+        evidence={
+            "environment": raw,
+            "source": "compute_worker_allowlist",
+            "host_scope": host_scope,
+            "oversized_fields_omitted": oversized_fields,
+        },
     )
 
 
@@ -479,6 +523,27 @@ def _allocation_hosts(raw: dict[str, str]) -> list[str]:
     return []
 
 
+def _parse_slurm_cpus_per_node(value: str | None) -> list[int] | None:
+    """Expand Slurm's bounded whole-job CPU layout, such as ``72(x2),36``."""
+
+    if value is None or not value or len(value) > 16 * 1024:
+        return None
+    result: list[int] = []
+    for token in value.split(","):
+        match = re.fullmatch(
+            r"\s*([1-9][0-9]{0,9})(?:\([xX]([1-9][0-9]{0,9})\))?\s*",
+            token,
+        )
+        if match is None:
+            return None
+        cpus = int(match.group(1))
+        repetitions = int(match.group(2) or 1)
+        if repetitions > 4096 or len(result) + repetitions > 4096:
+            return None
+        result.extend([cpus] * repetitions)
+    return result or None
+
+
 def _execution_argv(plan: ExecutionPlan) -> list[str]:
     if plan.container is None:
         return plan.argv
@@ -561,7 +626,8 @@ def _runtime_evidence(
         ),
     )
     allocation_coverage = "observed" if allocation.resources else "unknown"
-    if plan.backend != "direct" and not allocation.hosts:
+    host_scope = allocation.evidence.get("host_scope", "unknown")
+    if plan.backend != "direct" and host_scope != "allocation":
         allocation_coverage = "partially_observed" if allocation.resources else "unknown"
     requested_shape = (
         plan.resource_shape.to_dict()
@@ -583,6 +649,7 @@ def _runtime_evidence(
             "compute_worker_observed": allocation.resources,
             "scheduler_environment_facts": allocation.evidence.get("environment", {}),
             "hosts": allocation.hosts,
+            "host_scope": host_scope,
             "discrepancies": discrepancies,
         },
         diagnostic=(

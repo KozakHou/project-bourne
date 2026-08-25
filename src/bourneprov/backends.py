@@ -1,4 +1,4 @@
-"""Framework-independent direct, Slurm, and PBS execution backends."""
+"""Framework-independent direct, Slurm, PBS, and LSF execution backends."""
 
 from __future__ import annotations
 
@@ -22,6 +22,17 @@ from .execution_outcomes import (
 from .execution_request import ExecutionRequest
 from .identity import current_process_identity
 from .inventory_models import InventorySnapshot
+from .lsf import (
+    LSF_TERMINAL_STATES,
+    SAFE_LSF_JOB,
+    active_job_arguments,
+    historical_job_arguments,
+    lsf_job_is_unobservable,
+    normalize_lsf_state,
+    parse_bhist_job,
+    parse_bjobs_job,
+    recent_job_arguments,
+)
 from .planning_models import ResourceShape
 from .worker_bundle import build_worker_zipapp, write_staged_plan
 from .worker_result import WorkerResult, WorkerResultError, load_worker_result
@@ -36,7 +47,7 @@ MAX_SCHEDULER_POLL_SECONDS = 60.0
 _SAFE_SCHEDULER_NAME = re.compile(r"[A-Za-z0-9_.+-]+\Z")
 _SAFE_SLURM_JOB = re.compile(r"[0-9]+(?:_[0-9]+)?\Z")
 _SAFE_PBS_JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_SAFE_LSF_JOB = re.compile(r"[0-9]+\Z")
+_SAFE_LSF_JOB = SAFE_LSF_JOB
 
 CommandRunner = Callable[..., BoundedCommandResult]
 
@@ -65,6 +76,7 @@ class SchedulerObservation:
     observable: bool
     terminal: bool
     diagnostic: str | None = None
+    raw_state: str | None = None
 
     def details(self, family: str, job_id: str) -> dict[str, object]:
         value: dict[str, object] = {
@@ -77,6 +89,8 @@ class SchedulerObservation:
         }
         if self.diagnostic is not None:
             value["diagnostic"] = self.diagnostic
+        if self.raw_state is not None:
+            value["raw_scheduler_state"] = self.raw_state
         return value
 
 
@@ -326,7 +340,9 @@ class SchedulerBackend:
                 pass
             job = self._known_job(current)
             observation = self._observe_and_record(current, job)
-            if observation.terminal or not observation.observable:
+            if observation.terminal or (
+                not observation.observable and self.name != "lsf"
+            ):
                 try:
                     return self.collect(self.store.get_execution(execution.id))
                 except BackendError as exc:
@@ -662,10 +678,7 @@ class LSFBackend(SchedulerBackend):
 
     @property
     def terminal_states(self) -> set[str]:
-        return {
-            "completed", "failed", "cancelled", "timeout", "out_of_memory",
-            "node_fail", "unknown_terminal",
-        }
+        return set(LSF_TERMINAL_STATES)
 
     def _submit_arguments(self, script_path: Path) -> list[str]:
         del script_path
@@ -681,7 +694,7 @@ class LSFBackend(SchedulerBackend):
         return matches[0]
 
     def _status_arguments(self, job_id: str, identity: str) -> list[str]:
-        return ["-noheader", "-u", identity, "-o", "jobid stat", job_id]
+        return active_job_arguments(job_id, identity)
 
     def _parse_status(self, result: BoundedCommandResult) -> str:
         if result.returncode != 0 or result.timed_out:
@@ -702,10 +715,12 @@ class LSFBackend(SchedulerBackend):
             active.stdout, expected_job_id=job.job_id
         )
         if parsed is not None:
-            state = _normalize_lsf_state(parsed[1])
+            raw_state = parsed[1]
+            state = _normalize_lsf_state(raw_state)
             return SchedulerObservation(
                 state=state, source="active", observable=True,
                 terminal=state in self.terminal_states,
+                raw_state=raw_state,
             )
         if active.timed_out:
             raise BackendError(f"LSF active status timed out: {_failure_detail(active)}")
@@ -715,35 +730,62 @@ class LSFBackend(SchedulerBackend):
             raise BackendError(
                 "LSF active status did not contain one unique exact job record"
             )
+        recent = self._run(
+            [status_executable, *recent_job_arguments(
+                job.job_id, job.submitting_identity
+            )]
+        )
+        recent_parsed = (
+            None
+            if recent.returncode != 0 or recent.timed_out
+            else _parse_lsf_job_line(recent.stdout, expected_job_id=job.job_id)
+        )
+        if recent_parsed is not None:
+            raw_state = recent_parsed[1]
+            state = _normalize_lsf_state(raw_state)
+            return SchedulerObservation(
+                state=state, source="recent_finished", observable=True,
+                terminal=state in self.terminal_states, raw_state=raw_state,
+            )
+
+        history_executable = shutil.which("bhist")
+        if history_executable is None:
+            return SchedulerObservation(
+                state="unobservable", source="historical_accounting_unavailable",
+                observable=False, terminal=False,
+                diagnostic=(
+                    "known job was absent from active and recent-finished LSF "
+                    "views; bhist is unavailable"
+                ),
+            )
         historical = self._run(
-            [
-                status_executable, "-a", "-noheader", "-u",
-                job.submitting_identity, "-o", "jobid stat", job.job_id,
-            ]
+            [history_executable, *historical_job_arguments(
+                job.job_id, job.submitting_identity
+            )]
         )
         historical_parsed = (
             None
             if historical.returncode != 0 or historical.timed_out
-            else _parse_lsf_job_line(historical.stdout, expected_job_id=job.job_id)
+            else parse_bhist_job(historical.stdout, expected_job_id=job.job_id)
         )
         if historical_parsed is None:
             if historical.timed_out:
-                diagnostic = "LSF historical/accounting query timed out"
-            elif historical.returncode == 0 and historical.stdout.strip():
-                diagnostic = (
-                    "LSF historical/accounting output did not contain one "
-                    "unique exact job record"
-                )
+                diagnostic = "exact-job bhist query timed out"
+            elif historical.returncode != 0:
+                diagnostic = "exact-job bhist query failed: " + _failure_detail(historical)
+            elif historical.stdout.strip():
+                diagnostic = "bhist output did not contain one unique exact job record"
             else:
-                diagnostic = "known job was absent from active and historical LSF views"
+                diagnostic = "known job was absent from active, recent, and historical LSF views"
             return SchedulerObservation(
-                state="unobservable", source="historical_unavailable",
-                observable=False, terminal=False, diagnostic=diagnostic,
+                state="unobservable", source="historical_accounting",
+                observable=False, terminal=False, diagnostic=diagnostic[:4096],
             )
-        state = _normalize_lsf_state(historical_parsed[1])
+        raw_state = historical_parsed[1]
+        state = _normalize_lsf_state(raw_state)
         return SchedulerObservation(
             state=state, source="historical_accounting", observable=True,
-            terminal=state in self.terminal_states,
+            terminal=state in self.terminal_states, raw_state=raw_state,
         )
 
     def _cancel_arguments(self, job_id: str, identity: str) -> list[str]:
@@ -1127,7 +1169,9 @@ def _telemetry_semantics(value: ExecutionTelemetrySummary | None) -> object:
 
 
 def _execution_state(observation: SchedulerObservation) -> str:
-    if not observation.observable:
+    if not observation.observable or observation.state in {
+        "unknown", "scheduler_uncertain"
+    }:
         return "scheduler_unobservable"
     if observation.terminal:
         return "scheduler_terminal"
@@ -1175,29 +1219,16 @@ def _parse_slurm_accounting_state(stdout: str, job_id: str) -> str | None:
 def _parse_lsf_job_line(
     stdout: str, expected_job_id: str | None = None
 ) -> tuple[str, str] | None:
-    rows: list[tuple[str, str]] = []
-    for line in stdout.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and _SAFE_LSF_JOB.fullmatch(fields[0]):
-            if expected_job_id is None or fields[0] == expected_job_id:
-                rows.append((fields[0], fields[1]))
-    return rows[0] if len(rows) == 1 else None
+    if expected_job_id is None:
+        rows = [line.split() for line in stdout.splitlines() if line.strip()]
+        if len(rows) != 1 or len(rows[0]) != 2:
+            return None
+        expected_job_id = rows[0][0]
+    return parse_bjobs_job(stdout, expected_job_id=expected_job_id)
 
 
 def _normalize_lsf_state(value: str) -> str:
-    return {
-        "PEND": "pending",
-        "WAIT": "pending",
-        "PROV": "pending",
-        "RUN": "running",
-        "PSUSP": "suspended",
-        "USUSP": "suspended",
-        "SSUSP": "suspended",
-        "DONE": "completed",
-        "EXIT": "failed",
-        "ZOMBI": "failed",
-        "UNKWN": "unknown_terminal",
-    }.get(value.strip().upper(), "unknown")
+    return normalize_lsf_state(value)
 
 
 def _pbs_job_is_unobservable(result: BoundedCommandResult) -> bool:
@@ -1211,15 +1242,7 @@ def _pbs_job_is_unobservable(result: BoundedCommandResult) -> bool:
 
 
 def _lsf_job_is_unobservable(result: BoundedCommandResult) -> bool:
-    diagnostic = f"{result.stderr}\n{result.stdout}".casefold()
-    return bool(
-        re.search(
-            r"job(?:\s+<[^>]+>)?\s+(?:is\s+not\s+found|not\s+found)"
-            r"|no\s+(?:unfinished\s+)?job\s+found"
-            r"|not\s+found\s+in\s+job\s+list",
-            diagnostic,
-        )
-    )
+    return lsf_job_is_unobservable(result)
 
 
 def _walltime(seconds: int) -> str:
