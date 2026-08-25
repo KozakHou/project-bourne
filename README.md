@@ -86,10 +86,10 @@ work without an agent or MCP.
 
 ### Human
 
-Install Project Bourne v0.8.0 from PyPI:
+Install Project Bourne v0.8.1 from PyPI:
 
 ~~~bash
-python -m pip install "bourneprov==0.8.0"
+python -m pip install "bourneprov==0.8.1"
 
 bourne run python examples/demo.py
 bourne list
@@ -140,14 +140,14 @@ failure never triggers blind resubmission.
 
 ### Agent / MCP
 
-The v0.8.0 agent and MCP entrypoints remain local stdio:
+The v0.8.1 agent and MCP entrypoints remain local stdio:
 
 ~~~bash
-python -m pip install "bourneprov[mcp]==0.8.0"
+python -m pip install "bourneprov[mcp]==0.8.1"
 bourne mcp
 
 # Or use the public transparent launcher:
-npx -y @project-bourne/mcp@0.8.0
+npx -y @project-bourne/mcp@0.8.1
 ~~~
 
 ## Development
@@ -229,7 +229,7 @@ v1/v2 and staged-plan v1/v2/v3 payloads.
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.8.0
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.8.1
 npm package and matching Registry metadata use the same release identity.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
@@ -567,7 +567,7 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The release version is `0.8.0`. The base runtime has zero third-party
+The release version is `0.8.1`. The base runtime has zero third-party
 dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:

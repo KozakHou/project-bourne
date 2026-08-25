@@ -66,7 +66,7 @@ worker, HPC environment, or npm launcher.
 7. Verify installation in a fresh environment:
 
    ```bash
-   python -m pip install bourneprov==0.8.0
+   python -m pip install bourneprov==0.8.1
    bourne --version
    ```
 
