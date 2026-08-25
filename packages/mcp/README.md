@@ -22,5 +22,5 @@ execution, schedulers, provenance, telemetry, and verification remain in the
 Python Bourne core.
 
 The canonical official MCP Registry identity is
-`io.github.KozakHou/project-bourne`. The v0.8.0 npm package and matching
+`io.github.KozakHou/project-bourne`. The v0.8.1 npm package and matching
 Registry metadata use the same release identity.
