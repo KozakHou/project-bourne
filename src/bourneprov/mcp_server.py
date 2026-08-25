@@ -75,19 +75,118 @@ def _provider_input_schema() -> dict[str, Any]:
 
 
 DeclarativeProviderDocument = Annotated[
-    dict[str, Any], WithJsonSchema(_provider_input_schema())
+    dict[str, Any],
+    WithJsonSchema(_provider_input_schema()),
+    Field(
+        description=(
+            "Optional bounded declarative constraints used to generate site-aware "
+            "candidates; the document cannot execute code or grant itself trust."
+        )
+    ),
 ]
 
 BoundedPolicyValue = bool | int | float | Annotated[str, Field(max_length=4096)]
+SiteReference = Annotated[
+    str,
+    Field(description="Exact configured site name or canonical site ID."),
+]
+InventoryReference = Annotated[
+    str,
+    Field(
+        description=(
+            "Existing inventory reference: latest, canonical ID, unique ID prefix, "
+            "or @N."
+        )
+    ),
+]
+CandidateRequestID = Annotated[
+    str,
+    Field(
+        description=(
+            "Request ID returned by bourne_site_candidates in the current live MCP "
+            "server session."
+        )
+    ),
+]
+CandidateID = Annotated[
+    str,
+    Field(
+        description=(
+            "Viable candidate ID returned for request_id by bourne_site_candidates."
+        )
+    ),
+]
+SelectionSource = Annotated[
+    str,
+    Field(
+        description=(
+            "Provenance label identifying the human, agent, or deterministic rule "
+            "that made the selection; this label does not grant authority."
+        )
+    ),
+]
+SelectionRationale = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Optional explanation stored with the selection; Bourne does not treat "
+            "the rationale itself as verification evidence."
+        )
+    ),
+]
+VariantApprovals = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Provider-bound parameter names whose candidate value changes the user "
+            "explicitly approved."
+        )
+    ),
+]
+ExecutionOnlyDeclarations = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Parameter names the user explicitly declared to affect execution only, "
+            "rather than scientific meaning."
+        )
+    ),
+]
+ProviderTrustDecision = Annotated[
+    bool,
+    Field(
+        description=(
+            "Explicitly trust the declarative provider's semantic classifications; "
+            "the provider cannot set this decision for itself."
+        )
+    ),
+]
 
 
 class PolicyApplicabilityDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    scope: Literal[
-        "global", "scheduler_class", "queue", "partition", "node_class", "account"
+    scope: Annotated[
+        Literal[
+            "global", "scheduler_class", "queue", "partition", "node_class", "account"
+        ],
+        Field(
+            description=(
+                "Site-policy scope. Global applies everywhere; other values restrict "
+                "the claim to one scheduler, queue, partition, node class, or account."
+            )
+        ),
     ] = "global"
-    value: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    value: Annotated[
+        str | None,
+        Field(
+            min_length=1,
+            max_length=256,
+            description=(
+                "Exact scope value when scope is not global; omit it for global claims."
+            ),
+        ),
+    ] = None
 
 
 class SitePolicyClaimDocument(BaseModel):
@@ -95,44 +194,161 @@ class SitePolicyClaimDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    subject: Annotated[str, Field(min_length=1, max_length=256)]
-    property: Annotated[str, Field(min_length=1, max_length=256)]
-    value: BoundedPolicyValue
-    evidence_kind: Literal[
-        "observed_now", "site_declared", "user_declared", "historical", "inferred", "unknown"
+    subject: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=256,
+            description="Entity or site capability that the policy claim describes.",
+        ),
     ]
-    interpretation_status: Literal["hard_constraint", "advisory", "unresolved"]
-    source_identity: Annotated[str, Field(min_length=1, max_length=512)]
+    property: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=256,
+            description="Bounded property asserted about the subject.",
+        ),
+    ]
+    value: Annotated[
+        BoundedPolicyValue,
+        Field(description="Boolean, numeric, or bounded string value being asserted."),
+    ]
+    evidence_kind: Annotated[
+        Literal[
+            "observed_now",
+            "site_declared",
+            "user_declared",
+            "historical",
+            "inferred",
+            "unknown",
+        ],
+        Field(description="Provenance classification for how the claim was obtained."),
+    ]
+    interpretation_status: Annotated[
+        Literal["hard_constraint", "advisory", "unresolved"],
+        Field(
+            description=(
+                "Whether planning must enforce the claim, may use it as advice, or "
+                "must preserve it as unresolved."
+            )
+        ),
+    ]
+    source_identity: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=512,
+            description=(
+                "Non-secret identity of the person, system, or document that supplied "
+                "the claim."
+            ),
+        ),
+    ]
     applicability: PolicyApplicabilityDocument = Field(
-        default_factory=PolicyApplicabilityDocument
+        default_factory=PolicyApplicabilityDocument,
+        description="Scope that determines which candidate resource shapes use the claim.",
     )
-    source_identifier: Annotated[str, Field(max_length=2048)] | None = None
-    source_url: Annotated[str, Field(max_length=2048)] | None = None
-    retrieved_at: Annotated[str, Field(max_length=128)] | None = None
-    document_date: Annotated[str, Field(max_length=128)] | None = None
+    source_identifier: Annotated[
+        str | None,
+        Field(
+            max_length=2048,
+            description="Optional stable identifier for the provenance source.",
+        ),
+    ] = None
+    source_url: Annotated[
+        str | None,
+        Field(
+            max_length=2048,
+            description=(
+                "Optional provenance URL stored as text only; Bourne does not fetch it."
+            ),
+        ),
+    ] = None
+    retrieved_at: Annotated[
+        str | None,
+        Field(
+            max_length=128,
+            description="Optional source-retrieval timestamp supplied by the caller.",
+        ),
+    ] = None
+    document_date: Annotated[
+        str | None,
+        Field(
+            max_length=128,
+            description="Optional date stated by the provenance source.",
+        ),
+    ] = None
     content_digest: Annotated[
-        str, Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    ] | None = None
+        str | None,
+        Field(
+            pattern=r"^sha256:[0-9a-f]{64}$",
+            description=(
+                "Optional sha256:<hex> digest of source content that remains outside "
+                "Bourne."
+            ),
+        ),
+    ] = None
 
 
 class ContainerMountDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Annotated[str, Field(min_length=1, max_length=16384)]
-    destination: Annotated[str, Field(min_length=1, max_length=16384)]
-    read_only: bool = True
+    source: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=16384,
+            description="Existing host path to bind into the scientific container.",
+        ),
+    ]
+    destination: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=16384,
+            description="Absolute path where the source is mounted in the container.",
+        ),
+    ]
+    read_only: bool = Field(
+        default=True,
+        description="Whether the bind mount must be read-only; defaults to true.",
+    )
 
 
 class ContainerExecutionDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    runtime: Literal["apptainer", "singularity"]
-    image: Annotated[str, Field(min_length=1, max_length=16384)]
-    mounts: list[ContainerMountDocument] = Field(default_factory=list, max_length=128)
-    clean_environment: bool = True
+    runtime: Annotated[
+        Literal["apptainer", "singularity"],
+        Field(description="Existing container runtime that the selected site will use."),
+    ]
+    image: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=16384,
+            description=(
+                "Existing image path; Bourne verifies it but never builds or pulls it."
+            ),
+        ),
+    ]
+    mounts: list[ContainerMountDocument] = Field(
+        default_factory=list,
+        max_length=128,
+        description="Explicit bind mounts applied when the immutable plan executes.",
+    )
+    clean_environment: bool = Field(
+        default=True,
+        description="Request a clean container environment when the runtime supports it.",
+    )
     image_digest: Annotated[
-        str, Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    ] | None = None
+        str | None,
+        Field(
+            pattern=r"^sha256:[0-9a-f]{64}$",
+            description="Optional expected sha256:<hex> digest for the existing image.",
+        ),
+    ] = None
 
 
 class ProductError(BaseModel):
@@ -272,7 +488,7 @@ def create_mcp_server(
         annotations=_annotation(read_only=True, idempotent=True),
         structured_output=True,
     )
-    async def bourne_inventory(reference: str = "latest") -> ToolResult:
+    async def bourne_inventory(reference: InventoryReference = "latest") -> ToolResult:
         return await call("inventory", partial(agent.inventory, reference))
 
     @server.tool(
@@ -290,16 +506,24 @@ def create_mcp_server(
         annotations=_annotation(read_only=True, idempotent=True),
         structured_output=True,
     )
-    async def bourne_site_inspect(reference: str) -> ToolResult:
+    async def bourne_site_inspect(reference: SiteReference) -> ToolResult:
         return await call("site_inspect", partial(agent.site, reference))
 
     @server.tool(
         name="bourne_site_discover",
-        description="Run bounded typed discovery at one configured site; no arbitrary SSH command is accepted.",
+        description=(
+            "Discover one configured site and persist a new immutable inventory "
+            "snapshot linked to it. `reference` is the site's exact name or canonical "
+            "ID. Use this for a named local or SSH site; use `bourne_discover` for "
+            "Bourne's current local context and `bourne_site_inspect` to read existing "
+            "state. SSH discovery may require existing user authorization, uses only "
+            "bounded typed probes, never accepts arbitrary commands, and never "
+            "executes a scientific workload."
+        ),
         annotations=_annotation(read_only=False, open_world=True),
         structured_output=True,
     )
-    async def bourne_site_discover(reference: str) -> ToolResult:
+    async def bourne_site_discover(reference: SiteReference) -> ToolResult:
         return await call(
             "site_discover", partial(agent.discover_site, reference), mutation=True
         )
@@ -307,15 +531,28 @@ def create_mcp_server(
     @server.tool(
         name="bourne_site_policy_claim",
         description=(
-            "Persist one bounded structured site-policy claim and provenance. "
-            "This accepts no shell command or source-document content."
+            "Append one durable structured policy claim and provenance record to an "
+            "existing configured site. `reference` is the exact site name or canonical "
+            "ID; `claim` contains the asserted fact, evidence classification, source "
+            "identity, and applicability. Use this for reviewed site constraints or "
+            "advice before candidate generation; use `bourne_site_discover` to observe "
+            "infrastructure. This stores no source document, fetches no URL, runs no "
+            "command, and does not modify previous claims."
         ),
         annotations=_annotation(read_only=False, destructive=False),
         structured_output=True,
     )
     async def bourne_site_policy_claim(
-        reference: str,
-        claim: SitePolicyClaimDocument,
+        reference: SiteReference,
+        claim: Annotated[
+            SitePolicyClaimDocument,
+            Field(
+                description=(
+                    "Bounded typed policy fact and provenance metadata to append to "
+                    "the configured site."
+                )
+            ),
+        ],
     ) -> ToolResult:
         return await call(
             "site_policy_claim",
@@ -329,15 +566,32 @@ def create_mcp_server(
 
     @server.tool(
         name="bourne_site_candidates",
-        description="Generate bounded ephemeral site-aware plan candidates without executing.",
+        description=(
+            "Generate at most 64 candidate plans for one configured site from an "
+            "ExecutionRequest, an existing inventory, and optional declarative "
+            "provider constraints. Use after site discovery and before "
+            "`bourne_site_select`; use `bourne_plan` when site-aware candidate "
+            "comparison is unnecessary. This does not execute or durably persist a "
+            "request or plan, but stores an ephemeral candidate session in this MCP "
+            "process; a restart loses that session."
+        ),
         annotations=_annotation(read_only=False, destructive=False),
         structured_output=True,
     )
     async def bourne_site_candidates(
-        reference: str,
+        reference: SiteReference,
         request: ExecutionRequestDocument,
-        provider: DeclarativeProviderDocument | None = None,
-        inventory_reference: str = "latest",
+        provider: Annotated[
+            DeclarativeProviderDocument | None,
+            Field(
+                description=(
+                    "Optional bounded declarative constraints used to generate "
+                    "candidates; the document cannot execute code or grant itself "
+                    "trust."
+                )
+            ),
+        ] = None,
+        inventory_reference: InventoryReference = "latest",
     ) -> ToolResult:
         return await call(
             "site_candidates",
@@ -350,19 +604,35 @@ def create_mcp_server(
 
     @server.tool(
         name="bourne_site_select",
-        description="Persist a bounded selection summary and materialize one viable immutable plan.",
+        description=(
+            "Choose one candidate returned by `bourne_site_candidates`, persist "
+            "selection evidence, and create a new immutable execution plan without "
+            "executing it. `request_id` and `candidate_id` must come from the same live "
+            "candidate session; regenerate candidates after a server restart. This "
+            "writes a new plan without editing existing plans. Review the returned "
+            "plan before calling `bourne_execute_plan`; selection fails when required "
+            "approvals, declarations, or provider trust are missing."
+        ),
         annotations=_annotation(read_only=False, destructive=False),
         structured_output=True,
     )
     async def bourne_site_select(
-        request_id: str,
-        candidate_id: str,
-        selection_source: str,
-        rationale: str | None = None,
-        variant_approvals: list[str] | None = None,
-        explicit_user_declarations: list[str] | None = None,
-        trusted_provider_contract: bool = False,
-        container: ContainerExecutionDocument | None = None,
+        request_id: CandidateRequestID,
+        candidate_id: CandidateID,
+        selection_source: SelectionSource,
+        rationale: SelectionRationale = None,
+        variant_approvals: VariantApprovals = None,
+        explicit_user_declarations: ExecutionOnlyDeclarations = None,
+        trusted_provider_contract: ProviderTrustDecision = False,
+        container: Annotated[
+            ContainerExecutionDocument | None,
+            Field(
+                description=(
+                    "Optional existing Apptainer or Singularity image and explicit "
+                    "mounts to freeze into the plan; Bourne never builds or pulls it."
+                )
+            ),
+        ] = None,
     ) -> ToolResult:
         return await call(
             "site_select",
@@ -390,7 +660,7 @@ def create_mcp_server(
     )
     async def bourne_plan(
         request: ExecutionRequestDocument,
-        inventory_reference: str = "latest",
+        inventory_reference: InventoryReference = "latest",
     ) -> ToolResult:
         return await call(
             "plan",
