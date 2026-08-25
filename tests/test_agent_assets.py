@@ -61,6 +61,7 @@ class AgentAssetTests(unittest.TestCase):
         self.assertIn("uv run --frozen --no-sync", ci)
         self.assertIn("uv build --no-sources", ci)
         self.assertIn("uv build --no-sources", release)
+        self.assertIn("if path.name != '.gitignore'", release)
         self.assertNotIn(" uv ", f" {runtime_sources.lower()} ")
 
     def test_npm_launcher_has_no_runtime_dependencies_and_exact_version_coupling(self) -> None:
@@ -186,12 +187,14 @@ class AgentAssetTests(unittest.TestCase):
 
     def test_npm_package_carries_the_repository_apache_license_and_notice(self) -> None:
         package_root = ROOT / "packages" / "mcp"
+        notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
         self.assertEqual(
             (package_root / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes()
         )
         self.assertEqual(
             (package_root / "NOTICE").read_bytes(), (ROOT / "NOTICE").read_bytes()
         )
+        self.assertIn("Copyright 2026 KozakHou", notice)
         package = load_json(package_root / "package.json")
         self.assertEqual(metadata("bourneprov")["License-Expression"], "Apache-2.0")
         self.assertEqual(package["license"], "Apache-2.0")

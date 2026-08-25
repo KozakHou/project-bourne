@@ -48,7 +48,8 @@ jobs:
         run: >-
           uv run --frozen --no-sync python -c "import pathlib, tomllib;
           version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'];
-          actual = {path.name for path in pathlib.Path('dist').iterdir()};
+          actual = {path.name for path in pathlib.Path('dist').iterdir()
+          if path.name != '.gitignore'};
           expected = {f'bourneprov-{version}-py3-none-any.whl', f'bourneprov-{version}.tar.gz'};
           assert actual == expected, f'expected {sorted(expected)}, found {sorted(actual)}'"
 
