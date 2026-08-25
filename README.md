@@ -1,7 +1,6 @@
 # Project Bourne
 
-[![project-bourne MCP server](https://glama.ai/mcp/servers/KozakHou/project-bourne/badges/score.svg)](https://glama.ai/mcp/servers/KozakHou/project-bourne)
-
+[![project-bourne MCP server](https://glama.ai/mcp/servers/KozakHou/project-bourne/badges/card.svg)](https://glama.ai/mcp/servers/KozakHou/project-bourne)
 
 Project Bourne is open-source execution and provenance infrastructure for
 reproducible scientific and engineering workloads.
