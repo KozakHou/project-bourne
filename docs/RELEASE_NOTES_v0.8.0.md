@@ -1,7 +1,5 @@
 # Project Bourne v0.8.0 — Runtime Evidence and Scheduler Coverage
 
-v0.8.0 is currently a development release (`0.8.0.dev0`) and is not published.
-
 The release adds first-class IBM LSF discovery and lifecycle support, bounded
 execution-scoped runtime evidence, more precise partial/failure semantics, and
 optional execution through an already-existing Apptainer/Singularity image.
@@ -36,12 +34,17 @@ build, pull, install, registry, Docker-daemon, Kubernetes, or shell-string
 execution path. v0.8 does not orchestrate multi-node container launch, choose
 MPI-launcher/container ordering, or inject MPI launchers.
 
-## Intentionally deferred
+## Bounded limitations
 
-This development milestone adds no public demo or marketing asset, Docker
-requirement, automatic dependency installation/build, cross-cluster placement,
-bulk data synchronization, monitoring daemon, distributed telemetry service,
-Rust component, or v0.9 work.
+Live LSF and live Apptainer validation have not yet been performed. Runtime
+sampling is execution-scoped and does not automatically aggregate across a
+multi-node allocation. Bourne does not inject MPI launchers or automatically
+choose container/MPI ordering. Portable LSF memory/GPU resource syntax remains
+site-specific and unresolved.
+
+This release adds no Docker requirement, automatic dependency
+installation/build, cross-cluster placement, bulk data synchronization,
+monitoring daemon, distributed telemetry service, Rust component, or v0.9 work.
 
 See [Runtime evidence and scheduler coverage](RUNTIME_EVIDENCE.md) for evidence
 semantics, protocol details, and bounded limitations.

@@ -84,26 +84,17 @@ work without an agent or MCP.
 
 ### Human
 
-The latest public release remains v0.7.0:
+Install Project Bourne v0.8.0 from PyPI:
 
 ~~~bash
-python -m pip install "bourneprov==0.7.0"
+python -m pip install "bourneprov==0.8.0"
 
 bourne run python examples/demo.py
 bourne list
 bourne show @1
 
-# Or execute a released ExecutionRequest v1 document:
+# Or execute an ExecutionRequest v2 document:
 bourne execute --request bourne.json
-~~~
-
-v0.8.0 is under development and is not published. To exercise its LSF,
-runtime-evidence, and existing-image features, use this source checkout with
-the locked contributor environment:
-
-~~~bash
-uv sync --locked --all-extras --dev
-uv run --frozen --no-sync bourne --version
 ~~~
 
 Configure a site-aware SSH workflow with the installed CLI:
@@ -147,14 +138,14 @@ failure never triggers blind resubmission.
 
 ### Agent / MCP
 
-The public v0.7.0 agent and MCP entrypoints remain local stdio:
+The v0.8.0 agent and MCP entrypoints remain local stdio:
 
 ~~~bash
-python -m pip install "bourneprov[mcp]==0.7.0"
+python -m pip install "bourneprov[mcp]==0.8.0"
 bourne mcp
 
 # Or use the public transparent launcher:
-npx -y @project-bourne/mcp@0.7.0
+npx -y @project-bourne/mcp@0.8.0
 ~~~
 
 ## Development
@@ -236,9 +227,8 @@ v1/v2 and staged-plan v1/v2/v3 payloads.
 
 The canonical local stdio server is `bourne mcp`. The stable official MCP
 Registry identity is `io.github.KozakHou/project-bourne`, and the portable
-Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The public
-v0.7.0 npm package and matching Registry metadata use the same release identity;
-the v0.8.0 development metadata is not published.
+Agent Skill is at [`skills/project-bourne`](skills/project-bourne). The v0.8.0
+npm package and matching Registry metadata use the same release identity.
 
 An MCP-compatible agent can translate an explicit request such as “Run this
 simulation using four GPUs and preserve provenance” into ExecutionRequest v2,
@@ -557,7 +547,7 @@ export BOURNE_DB=/path/to/experiments.sqlite3
 ~~~
 
 Opening an older Bourne database, including released v0.1.1 through v0.7.0
-databases, with v0.8.0.dev0 performs deterministic transactional migrations
+databases, with v0.8.0 performs deterministic transactional migrations
 through schema 7.
 Existing experiments, artifacts, lineage, inventories, workloads, plans,
 executions, scheduler jobs, allocations, events, and experiment links remain
@@ -575,7 +565,7 @@ License terms under which they were released. See the
 
 ## Release validation
 
-The repository version is `0.8.0.dev0`. The base runtime has zero third-party
+The release version is `0.8.0`. The base runtime has zero third-party
 dependencies; MCP support remains an explicit optional extra.
 
 Run the source-tree tests with:
@@ -596,3 +586,9 @@ telemetry, queue/performance prediction, arbitrary verification scripts,
 hosted HTTP MCP, embedded LLMs, and broad scientific-validity inference remain
 outside v0.8. See [runtime evidence and scheduler coverage](docs/RUNTIME_EVIDENCE.md),
 [the site-aware architecture](docs/SITE_AWARE_PLANNING.md), and [VISION](docs/VISION.md).
+
+Live LSF and live Apptainer validation have not yet been performed. Runtime
+sampling is execution-scoped and does not automatically aggregate across a
+multi-node allocation. Bourne does not inject MPI launchers or automatically
+choose container/MPI ordering. Portable LSF memory/GPU resource syntax remains
+site-specific and unresolved.

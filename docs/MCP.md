@@ -13,7 +13,7 @@ runtime evidence, and typed existing-image selection.
 The core remains dependency-free. Install MCP support explicitly:
 
 ```bash
-python -m pip install "bourneprov[mcp]==0.7.0"
+python -m pip install "bourneprov[mcp]==0.8.0"
 bourne mcp
 ```
 
@@ -33,9 +33,9 @@ logged.
 The public npm launcher provides the matching released server:
 
 ```bash
-npx -y @project-bourne/mcp@0.7.0
-npx -y @project-bourne/mcp@0.7.0 --doctor
-npx -y @project-bourne/mcp@0.7.0 --no-bootstrap
+npx -y @project-bourne/mcp@0.8.0
+npx -y @project-bourne/mcp@0.8.0 --doctor
+npx -y @project-bourne/mcp@0.8.0 --no-bootstrap
 ```
 
 It requires Node.js 22+. It first locates Python 3.10+ with the exact compatible
@@ -48,8 +48,8 @@ Release versions are coupled exactly:
 
 ```text
 @project-bourne/mcp 0.6.0 → bourneprov 0.6.0 (historical release)
-@project-bourne/mcp 0.7.0 → bourneprov 0.7.0
-@project-bourne/mcp 0.8.0-dev.0 → bourneprov 0.8.0.dev0 (source validation only)
+@project-bourne/mcp 0.7.0 → bourneprov 0.7.0 (historical release)
+@project-bourne/mcp 0.8.0 → bourneprov 0.8.0
 ```
 
 ## Discovery and Registry identity
@@ -65,7 +65,7 @@ the npm package `@project-bourne/mcp`. Its name must equal the package's
 `mcpName`; deterministic repository tests enforce that identity and version
 coupling. No HTTP or hosted transport is advertised.
 
-The v0.7.0 npm package metadata and Registry entry have matching package,
+The v0.8.0 npm package metadata and Registry entry have matching package,
 version, `mcpName`, and stdio transport identities.
 
 ## Generic host configuration
@@ -173,7 +173,7 @@ Apptainer/Singularity runtime, existing image path, optional SHA-256 digest,
 bounded binds, and environment behavior. It accepts no image build/pull action
 or arbitrary shell content.
 
-The v0.8 development server remains local stdio on Linux and macOS. It does not provide a
+The v0.8 server remains local stdio on Linux and macOS. It does not provide a
 hosted HTTP endpoint, built-in LLM, natural-language parser, MCP Tasks mapping,
 dashboard, remote MCP service, or Windows scientific process-tree claim. AI,
 MCP, credentials, and persistent daemons are not placed on HPC systems. SQLite
