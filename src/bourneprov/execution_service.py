@@ -28,7 +28,7 @@ from .execution_request import (
 from .references import ExperimentReferenceError, resolve_experiment
 from .storage import ExperimentStore
 from .worker_result import WorkerResult
-from .workload import inspect_workload, utc_now
+from .workload import compile_workload, inspect_workload, utc_now
 from .workload_models import (
     ExecutionAttempt,
     ExecutionConstraints,
@@ -52,7 +52,7 @@ class RequestExecutionResult:
 
 
 def request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
-    """Compile normalized intent into the existing framework-neutral workload."""
+    """Compile normalized local intent, retaining bounded local marker discovery."""
 
     if (
         request.requested_parent_experiment is not None
@@ -69,6 +69,28 @@ def request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
         resources=request.resources,
         constraints=request.execution,
         parent_experiment_id=request.resolved_parent_experiment_id,
+    )
+
+
+def remote_request_to_workload(request: ExecutionRequest) -> WorkloadSpec:
+    """Compile intent whose resolved cwd is authoritative in a remote context."""
+
+    if (
+        request.requested_parent_experiment is not None
+        and request.resolved_parent_experiment_id is None
+    ):
+        raise PlanningError(
+            "parent experiment reference must be resolved before workload compilation"
+        )
+    return compile_workload(
+        request.argv,
+        resolved_working_directory=request.resolved_working_directory,
+        inputs=request.artifacts.inputs,
+        outputs=request.artifacts.outputs,
+        resources=request.resources,
+        constraints=request.execution,
+        parent_experiment_id=request.resolved_parent_experiment_id,
+        inspection_scope="argv_and_authoritative_remote_working_directory",
     )
 
 

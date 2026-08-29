@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 from .constraint_providers import DeclarativeConstraintProvider
 from .discovery import discover_site
 from .execution_request import ExecutionRequest, RequestArtifacts, RequestSource
-from .execution_service import request_to_workload
+from .execution_service import remote_request_to_workload, request_to_workload
 from .ids import new_ulid
 from .inventory_models import InventorySnapshot
 from .inventory_storage import InventoryStore
@@ -31,7 +31,12 @@ from .site_planning import (
 )
 from .site_storage import SiteStore
 from .workload import utc_now
-from .workload_models import DecisionEvidence, ExecutionPlan, ResourceRequirements
+from .workload_models import (
+    DecisionEvidence,
+    ExecutionPlan,
+    ResourceRequirements,
+    WorkloadSpec,
+)
 from .workload_storage import ExecutionStore
 from .variants import candidate_variant_changes, materialize_json_variant
 
@@ -198,7 +203,7 @@ class SitePlanningService:
         if linked_site is None or linked_site.id != site.id:
             raise ValueError("inventory does not belong to the selected site")
         effective = self._effective_request(request, site)
-        workload = request_to_workload(effective)
+        workload = self._request_to_workload(effective, site)
         self.executions.save_request_with_workload(effective, workload)
         policy_claims = self.sites.policy_claims(site.id)
         shapes = list(resource_shapes) if resource_shapes is not None else generate_resource_shapes(
@@ -297,7 +302,7 @@ class SitePlanningService:
             planned_request = _variant_request(
                 session.request, site, variant, candidate.resource_shape
             )
-            planned_workload = request_to_workload(planned_request)
+            planned_workload = self._request_to_workload(planned_request, site)
             self.executions.save_request_with_workload(planned_request, planned_workload)
         family, scheduler_id, target_id = _scheduler_selection(
             planned_workload.constraints.backend, site.scheduler_hint, inventory, candidate
@@ -426,6 +431,14 @@ class SitePlanningService:
             resolved_working_directory=remote,
             source=RequestSource(request.source.kind, tuple(sorted(metadata.items()))),
         )
+
+    @staticmethod
+    def _request_to_workload(
+        request: ExecutionRequest, site: Site
+    ) -> WorkloadSpec:
+        if site.kind == "remote_ssh" and site.remote_project_root is not None:
+            return remote_request_to_workload(request)
+        return request_to_workload(request)
 
 
 def _scheduler_selection(

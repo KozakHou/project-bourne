@@ -54,8 +54,49 @@ def inspect_workload(
 
     if not argv or not argv[0]:
         raise ValueError("a scientific command is required")
-    command = [str(item) for item in argv]
     working_directory = (cwd or Path.cwd()).resolve(strict=False)
+    marker_names = [
+        name for name in _PROJECT_MARKERS
+        if (working_directory / name).is_file()
+    ]
+    return compile_workload(
+        argv,
+        resolved_working_directory=str(working_directory),
+        inputs=inputs,
+        outputs=outputs,
+        resources=resources,
+        constraints=constraints,
+        parent_experiment_id=parent_experiment_id,
+        project_markers=marker_names,
+        inspection_scope="argv_and_allowlisted_cwd_markers",
+    )
+
+
+def compile_workload(
+    argv: Sequence[str],
+    *,
+    resolved_working_directory: str,
+    inputs: Sequence[str] = (),
+    outputs: Sequence[str] = (),
+    resources: ResourceRequirements | None = None,
+    constraints: ExecutionConstraints | None = None,
+    parent_experiment_id: str | None = None,
+    project_markers: Sequence[str] = (),
+    inspection_scope: str = "argv_and_authoritative_working_directory",
+) -> WorkloadSpec:
+    """Compile a spec from an authoritative cwd without filesystem observation.
+
+    Callers are responsible for resolving the working-directory value in its own
+    execution context. This boundary deliberately treats that value as opaque: it
+    does not resolve it or inspect it through the local control-plane filesystem.
+    """
+
+    if not argv or not argv[0]:
+        raise ValueError("a scientific command is required")
+    if not resolved_working_directory:
+        raise ValueError("a resolved working directory is required")
+    command = [str(item) for item in argv]
+    marker_names = [str(item) for item in project_markers]
     requested = resources or ResourceRequirements()
     selected_constraints = constraints or ExecutionConstraints()
     evidence = [
@@ -65,7 +106,7 @@ def inspect_workload(
         ),
         RequirementEvidence(
             subject="working_directory", state="explicit", source="command_context",
-            value=str(working_directory),
+            value=resolved_working_directory,
         ),
     ]
     for name, value in vars(requested).items():
@@ -126,10 +167,6 @@ def inspect_workload(
             )
         )
 
-    marker_names = [
-        name for name in _PROJECT_MARKERS
-        if (working_directory / name).is_file()
-    ]
     for name in marker_names:
         evidence.append(
             RequirementEvidence(
@@ -147,7 +184,7 @@ def inspect_workload(
     ]
     return WorkloadSpec(
         id=new_ulid(), created_at=utc_now(),
-        working_directory=str(working_directory), executable=command[0],
+        working_directory=resolved_working_directory, executable=command[0],
         arguments=command[1:], inputs=list(inputs), outputs=list(outputs),
         resources=effective_resources,
         capability_requirements=capability_requirements,
@@ -156,7 +193,7 @@ def inspect_workload(
         parent_experiment_id=parent_experiment_id,
         project_markers=marker_names,
         metadata={
-            "inspection_scope": "argv_and_allowlisted_cwd_markers",
+            "inspection_scope": inspection_scope,
             "recursive_scan": False,
             "marker_contents_read": False,
             "commands_executed": False,

@@ -264,6 +264,20 @@ class ExecutionRequestValidationTests(unittest.TestCase):
         self.assertEqual(cli_workload.resources, file_workload.resources)
         self.assertEqual(cli_workload.outputs, file_workload.outputs)
 
+    def test_local_request_compilation_still_observes_bounded_project_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pyproject.toml").touch()
+            request = execution_request_from_cli(["solver"], cwd=root)
+            workload = request_to_workload(request)
+
+        self.assertEqual(workload.working_directory, str(root.resolve()))
+        self.assertEqual(workload.project_markers, ["pyproject.toml"])
+        self.assertEqual(
+            workload.metadata["inspection_scope"],
+            "argv_and_allowlisted_cwd_markers",
+        )
+
     def test_packaged_json_schema_identifies_the_same_contract_and_bounds(self) -> None:
         schema = execution_request_schema()
         self.assertEqual(schema["properties"]["kind"]["const"], REQUEST_KIND)

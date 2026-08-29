@@ -518,7 +518,8 @@ def create_mcp_server(
             "Bourne's current local context and `bourne_site_inspect` to read existing "
             "state. SSH discovery may require existing user authorization, uses only "
             "bounded typed probes, never accepts arbitrary commands, and never "
-            "executes a scientific workload."
+            "executes a scientific workload. Returns a compact summary and immutable "
+            "snapshot ID; use `bourne_inventory` with that ID for the full inventory."
         ),
         annotations=_annotation(read_only=False, open_world=True),
         structured_output=True,

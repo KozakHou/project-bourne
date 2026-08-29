@@ -93,6 +93,7 @@ class MCPServerSchemaDocumentationTests(unittest.TestCase):
         description_boundaries = {
             "bourne_site_discover": (
                 "bourne_discover", "bourne_site_inspect", "never executes",
+                "compact summary", "bourne_inventory",
             ),
             "bourne_site_policy_claim": (
                 "bourne_site_discover", "fetches no URL", "previous claims",

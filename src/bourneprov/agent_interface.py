@@ -154,7 +154,7 @@ class BourneAgentService:
         return {
             "site": reference,
             "snapshot_id": snapshot.id,
-            "inventory": snapshot.to_dict(),
+            "captured_at": snapshot.captured_at,
             "summary": _inventory_summary(snapshot),
         }
 

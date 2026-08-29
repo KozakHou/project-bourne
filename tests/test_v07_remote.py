@@ -16,8 +16,11 @@ from bourneprov.backends import BackendError
 from bourneprov.constraint_providers import DeclarativeConstraintProvider
 from bourneprov.cli import main as cli_main
 from bourneprov.execution_request import execution_request_from_cli
-from bourneprov.execution_service import ExecutionService
-from bourneprov.execution_service import PlanningError
+from bourneprov.execution_service import (
+    ExecutionService,
+    PlanningError,
+    remote_request_to_workload,
+)
 from bourneprov.ids import new_ulid
 from bourneprov.inventory_models import Capability, InventorySnapshot
 from bourneprov.inventory_storage import InventoryStore
@@ -193,6 +196,27 @@ class RemoteTransportContractTests(unittest.TestCase):
         self.assertIn(b"pathlib.Path(sys.argv[1])", options["input_bytes"])
         self.assertIs(options["shell"], False)
 
+    def test_bootstrap_failure_preserves_bounded_stderr_detail(self) -> None:
+        diagnostic = "permission denied: read-only home\n" + "x" * 5000 + "END-LEAK"
+
+        def runner(argv, **kwargs):
+            del kwargs
+            return result(list(argv), stderr=diagnostic, returncode=1)
+
+        site = Site(
+            new_ulid(), "cluster", "remote_ssh", utc_now(), ssh_host="cluster"
+        )
+        transport = OpenSSHTransport(runner=runner)
+        with patch("bourneprov.remote_transport.shutil.which", return_value="/usr/bin/ssh"):
+            with self.assertRaises(RemoteTransportError) as raised:
+                transport._bootstrap_directory(site, "/work/user/.bourne/workers")
+
+        message = str(raised.exception)
+        self.assertIn("could not prepare the remote user-space cache", message)
+        self.assertIn("permission denied: read-only home", message)
+        self.assertNotIn("END-LEAK", message)
+        self.assertLessEqual(len(message), 4200)
+
     def test_remote_state_and_pbs_identity_reject_option_or_path_substitution(self) -> None:
         execution_id = new_ulid()
         with self.assertRaisesRegex(remote_worker.RemoteWorkerError, "Bourne execution path"):
@@ -343,6 +367,138 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(session.exploration.candidates[0].state, "unresolved")
         self.assertIn("mpirun", session.exploration.candidates[0].unresolved[0])
+
+
+class RemoteWorkingDirectoryCompilationTests(unittest.TestCase):
+    @staticmethod
+    def _linked_remote_site(
+        database: Path,
+        inventory_root: Path,
+        *,
+        local_root: str | None,
+        remote_root: str,
+    ) -> tuple[Site, InventorySnapshot]:
+        service = SiteService(database)
+        site = service.add_site(
+            "mapped-hpc",
+            ssh_host="bourne-testing",
+            scheduler_hint="slurm",
+            local_project_root=local_root,
+            remote_project_root=remote_root,
+        )
+        snapshot = inventory_snapshot(
+            inventory_root,
+            scheduler_families=("slurm",),
+            executable="hostname",
+        )
+        snapshot = replace(snapshot, site_label=site.name)
+        InventoryStore(database).save(snapshot)
+        service.sites.link_inventory(site.id, snapshot.id)
+        return site, snapshot
+
+    def test_macos_local_root_maps_to_exact_remote_cwd_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            local_root = "/Users/kozakhou/Desktop/p_bourne_folder"
+            remote_root = "/home/user/project"
+            site, snapshot = self._linked_remote_site(
+                database,
+                root,
+                local_root=local_root,
+                remote_root=remote_root,
+            )
+            request = execution_request_from_cli(
+                ["/bin/hostname"], cwd=Path(local_root) / "cases" / "one"
+            )
+
+            session = SitePlanningService(database).explore_request(
+                request,
+                site.id,
+                snapshot,
+                resource_shapes=[ResourceShape(nodes=1, total_cpus=1)],
+            )
+            stored = ExecutionStore(database).get_workload(session.workload_id)
+
+        expected = "/home/user/project/cases/one"
+        self.assertEqual(session.request.resolved_working_directory, expected)
+        self.assertEqual(stored.working_directory, expected)
+        self.assertEqual(
+            stored.metadata["inspection_scope"],
+            "argv_and_authoritative_remote_working_directory",
+        )
+
+    def test_authoritative_remote_cwd_is_not_resolved_or_probed_locally(self) -> None:
+        request = execution_request_from_cli(
+            ["/bin/hostname"], cwd=Path("/tmp/local-project")
+        )
+        remote_request = replace(
+            request,
+            resolved_working_directory="/home/user/project",
+        )
+
+        with patch.object(
+            Path,
+            "resolve",
+            side_effect=AssertionError("remote cwd was locally resolved"),
+        ) as resolve, patch.object(
+            Path,
+            "is_file",
+            side_effect=AssertionError("remote cwd was locally probed"),
+        ) as is_file:
+            workload = remote_request_to_workload(remote_request)
+
+        self.assertEqual(workload.working_directory, "/home/user/project")
+        self.assertEqual(workload.project_markers, [])
+        resolve.assert_not_called()
+        is_file.assert_not_called()
+
+    def test_minimal_remote_site_request_reaches_candidate_exploration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            site, snapshot = self._linked_remote_site(
+                database,
+                root,
+                local_root=None,
+                remote_root="/home/user/project",
+            )
+            request = execution_request_from_cli(["/bin/hostname"], cwd=root)
+
+            session = SitePlanningService(database).explore_request(
+                request,
+                site.id,
+                snapshot,
+                resource_shapes=[ResourceShape(nodes=1, total_cpus=1)],
+            )
+
+        self.assertEqual(
+            session.request.resolved_working_directory,
+            "/home/user/project",
+        )
+        self.assertGreater(session.exploration.generated_count, 0)
+
+    def test_working_directory_outside_site_mapping_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            site, snapshot = self._linked_remote_site(
+                database,
+                root,
+                local_root=str(root / "configured"),
+                remote_root="/home/user/project",
+            )
+            request = execution_request_from_cli(
+                ["/bin/hostname"], cwd=root / "outside"
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside the configured site mapping"):
+                SitePlanningService(database).explore_request(
+                    request,
+                    site.id,
+                    snapshot,
+                    resource_shapes=[ResourceShape(nodes=1, total_cpus=1)],
+                )
 
 
 class FakeHPCEndToEndTests(unittest.TestCase):

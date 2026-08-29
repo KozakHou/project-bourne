@@ -175,7 +175,10 @@ class OpenSSHTransport:
         argv = [*self._ssh_prefix(site), "python3", "-", directory]
         result = self._run(argv, input_bytes=program.encode("utf-8"))
         if result.returncode != 0 or result.timed_out or result.truncated:
-            raise RemoteTransportError("could not prepare the remote user-space cache")
+            detail = result.stderr.strip()[:4096] or "remote cache bootstrap failed"
+            raise RemoteTransportError(
+                f"could not prepare the remote user-space cache: {detail}"
+            )
 
     def _bootstrap_default_directory(self, site: Site) -> str:
         program = (

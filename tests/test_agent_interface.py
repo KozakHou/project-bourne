@@ -4,7 +4,9 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from bourneprov.agent_interface import AgentInterfaceError, BourneAgentService
 from bourneprov.inventory_storage import InventoryStore
@@ -23,6 +25,33 @@ def request(command: list[str], **values: object) -> dict[str, object]:
 
 
 class AgentInterfaceTests(unittest.TestCase):
+    def test_site_discovery_payload_is_compact_and_full_inventory_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "bourne.sqlite3"
+            service = BourneAgentService(database, cwd=root)
+            site = service.site_service.add_site("local-fixture")
+            snapshot = replace(
+                inventory_snapshot(root, executable="python"),
+                site_label=site.name,
+            )
+            InventoryStore(database).save(snapshot)
+            service.site_service.sites.link_inventory(site.id, snapshot.id)
+
+            with patch.object(
+                service.site_service, "discover", return_value=snapshot
+            ):
+                discovered = service.discover_site(site.id)
+            full = service.inventory(discovered["snapshot_id"])
+
+        self.assertNotIn("inventory", discovered)
+        self.assertIn("summary", discovered)
+        self.assertLess(len(json.dumps(discovered)), 4096)
+        self.assertEqual(
+            full["inventory"]["snapshot"]["id"], discovered["snapshot_id"]
+        )
+        self.assertEqual(len(full["inventory"]["capabilities"]), 1)
+
     def test_validation_is_canonical_normalized_and_has_no_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
